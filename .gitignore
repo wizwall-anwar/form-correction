@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 .env
 data/
+results/
 *.pt
 *.pth
 *.zip
+*.tar
+*.tar.gz
