@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import random
 import time
 import urllib.error
 import urllib.request
@@ -26,12 +27,16 @@ from pathlib import Path
 import numpy as np
 
 from .config import (
-    GEMINI_MODEL_ID,
+    GEMINI_MODEL_FALLBACKS,
     RANDOM_SEED,
     VLM_BACKEND,
     VLM_CACHE_DIR,
     VLM_ERROR_BODY_PREVIEW_CHARS,
     VLM_RATE_LIMIT_DELAY_S,
+    VLM_RETRY_BASE_DELAY_S,
+    VLM_RETRY_MAX_ATTEMPTS,
+    VLM_RETRY_MAX_DELAY_S,
+    VLM_RETRY_STATUSES,
     VLM_TIMEOUT_S,
 )
 from .m00_data import Sample
@@ -121,9 +126,13 @@ def vlm_score_stub(keyframes: list[np.ndarray], seed: int) -> int:
 
 
 def vlm_score_gemini(
-    image_bytes: bytes, seq_id: str, angle: float, seed: int
+    image_bytes: bytes,
+    seq_id: str,
+    angle: float,
+    seed: int,
+    rng: random.Random | None = None,
 ) -> int | str:
-    """Call Gemini with a stick-figure image, caching results on disk."""
+    """Call Gemini fallbacks with transient retries, caching successful results."""
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
@@ -140,12 +149,6 @@ def vlm_score_gemini(
         except (json.JSONDecodeError, KeyError):
             pass
 
-    time.sleep(VLM_RATE_LIMIT_DELAY_S)
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL_ID}:generateContent"
-    )
     payload = json.dumps({
         "contents": [{"parts": [
             {"text": _GEMINI_PROMPT},
@@ -156,55 +159,97 @@ def vlm_score_gemini(
         ]}],
     }).encode()
 
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key,
-        },
-        method="POST",
-    )
-    status: int | str = "unavailable"
-    response_body = ""
-    error = "<unavailable>"
-    try:
-        with urllib.request.urlopen(req, timeout=VLM_TIMEOUT_S) as resp:
-            status = getattr(resp, "status", "unavailable")
-            response_body = resp.read().decode("utf-8", errors="replace")
-        result = json.loads(response_body)
-        parts = result["candidates"][0]["content"]["parts"]
-        text = next(
-            part["text"]
-            for part in parts
-            if isinstance(part.get("text"), str)
-        )
-        stripped_text = text.lstrip()
-        if not stripped_text or stripped_text[0] not in ("0", "1", "2"):
-            raise ValueError(f"Gemini response text={text[:40]!r}")
-        bin_val = int(stripped_text[0])
-        cache_file.write_text(json.dumps({
-            "bin": bin_val, "raw": text,
-            "seq_id": str(seq_id), "angle": float(angle),
-        }))
-        return bin_val
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-        try:
-            response_body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
+    random_source = rng if rng is not None else random
+    failures: list[tuple[str, int | str, str, str]] = []
+    for model in GEMINI_MODEL_FALLBACKS:
+        status: int | str = "unavailable"
+        response_body = ""
+        error = "<unavailable>"
+        for attempt in range(1, VLM_RETRY_MAX_ATTEMPTS + 1):
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent"
+            )
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                method="POST",
+            )
             response_body = ""
-        error = f"HTTPError: {exc.reason}"
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+            time.sleep(VLM_RATE_LIMIT_DELAY_S)
+            try:
+                with urllib.request.urlopen(req, timeout=VLM_TIMEOUT_S) as resp:
+                    status = getattr(resp, "status", "unavailable")
+                    response_body = resp.read().decode("utf-8", errors="replace")
+                result = json.loads(response_body)
+                parts = result["candidates"][0]["content"]["parts"]
+                text = next(
+                    part["text"]
+                    for part in parts
+                    if isinstance(part.get("text"), str)
+                )
+                stripped_text = text.lstrip()
+                if not stripped_text or stripped_text[0] not in ("0", "1", "2"):
+                    raise ValueError(f"Gemini response text={text[:40]!r}")
+                bin_val = int(stripped_text[0])
+                cache_file.write_text(json.dumps({
+                    "bin": bin_val,
+                    "raw": text,
+                    "seq_id": str(seq_id),
+                    "angle": float(angle),
+                    "model": model,
+                }))
+                return bin_val
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                try:
+                    response_body = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    response_body = ""
+                error = f"HTTPError: {exc.reason}"
+                if status not in VLM_RETRY_STATUSES or attempt == VLM_RETRY_MAX_ATTEMPTS:
+                    break
+                retry_after = None
+                try:
+                    retry_after = float(exc.headers.get("Retry-After"))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+                if retry_after is None or retry_after < 0:
+                    delay = min(
+                        VLM_RETRY_MAX_DELAY_S,
+                        VLM_RETRY_BASE_DELAY_S * 2 ** (attempt - 1),
+                    ) * random_source.uniform(0.5, 1.5)
+                else:
+                    delay = min(VLM_RETRY_MAX_DELAY_S, retry_after)
+                time.sleep(delay)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                break
+        failures.append((model, status, response_body, error))
 
-    status_text = str(status).replace(api_key, "[REDACTED]")
-    preview = response_body.replace(api_key, "[REDACTED]")[:VLM_ERROR_BODY_PREVIEW_CHARS]
-    error = error.replace(api_key, "[REDACTED]")
-    _LOGGER.warning(
-        "Gemini scoring failed; HTTP status=%s; response body=%s; error=%s",
-        status_text,
-        preview or "<unavailable>",
-        error,
+    for model, status, response_body, error in failures:
+        safe_model = model.replace(api_key, "[REDACTED]")
+        status_text = str(status).replace(api_key, "[REDACTED]")
+        preview = response_body.replace(api_key, "[REDACTED]")[
+            :VLM_ERROR_BODY_PREVIEW_CHARS
+        ]
+        safe_error = error.replace(api_key, "[REDACTED]")
+        _LOGGER.warning(
+            "Gemini model %s failed; HTTP status=%s; response body=%s; error=%s",
+            safe_model,
+            status_text,
+            preview or "<unavailable>",
+            safe_error,
+        )
+    _LOGGER.info(
+        "Gemini scoring exhausted all %d fallbacks for seq_id=%s, angle=%s",
+        len(GEMINI_MODEL_FALLBACKS),
+        str(seq_id).replace(api_key, "[REDACTED]"),
+        angle,
     )
     return _STUB_RESULT
 
@@ -303,6 +348,7 @@ def agreement_report(
         backend = os.environ.get("VLM_BACKEND", VLM_BACKEND)
 
     report: dict = {"model_vs_clinician_reliability": {}}
+    rng = random.Random(seed)
     for angle in view_degs:
         model_bins: list[int] = []
         clinician_bins: list[int] = []
@@ -313,7 +359,9 @@ def agreement_report(
 
             if backend == "gemini":
                 image = render_keyframes_image(keyframes)
-                score = vlm_score_gemini(image, sample.seq_id, angle, seed + index)
+                score = vlm_score_gemini(
+                    image, sample.seq_id, angle, seed + index, rng=rng
+                )
             else:
                 score = vlm_score_with_timeout(keyframes, seed + index)
 

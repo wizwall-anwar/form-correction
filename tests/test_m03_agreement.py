@@ -40,6 +40,18 @@ class _Response:
         return self.body
 
 
+def _http_error(request, status=503, body=b"busy", headers=None):
+    """Build a fresh HTTPError with the response fields used by the client."""
+
+    return urllib.error.HTTPError(
+        request.full_url,
+        status,
+        "error",
+        headers or {},
+        io.BytesIO(body),
+    )
+
+
 def test_cohen_kappa_matches_hand_computed_value():
     np.testing.assert_allclose(cohen_kappa([0, 1, 2, 1], [0, 2, 2, 1]), 7 / 11, atol=1e-12)
 
@@ -96,6 +108,131 @@ def test_gemini_parses_digit_and_sends_key_only_in_header(monkeypatch, tmp_path)
     assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
     assert requests[0].get_header("X-goog-api-key") == "test-secret"
     assert "test-secret" not in requests[0].full_url
+    cached = json.loads(next(tmp_path.iterdir()).read_text())
+    assert cached["model"] == config.GEMINI_MODEL_FALLBACKS[0]
+
+    monkeypatch.setattr(
+        m03_agreement.urllib.request,
+        "urlopen",
+        lambda request, timeout: pytest.fail("cached success made an HTTP request"),
+    )
+    assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
+
+
+def test_gemini_retries_503_then_returns_success(monkeypatch, tmp_path):
+    requests = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if len(requests) < 3:
+            raise _http_error(request)
+        return _Response(b'{"candidates":[{"content":{"parts":[{"text":"1"}]}}]}')
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement, "GEMINI_MODEL_FALLBACKS", ("model-a",))
+    monkeypatch.setattr(m03_agreement.time, "sleep", sleeps.append)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    result = vlm_score_gemini(
+        b"png", "seq", 0, 7, rng=m03_agreement.random.Random(7)
+    )
+
+    retry_sleeps = [delay for delay in sleeps if delay != config.VLM_RATE_LIMIT_DELAY_S]
+    assert result == 1
+    assert len(requests) == 3
+    assert sleeps.count(config.VLM_RATE_LIMIT_DELAY_S) == 3
+    assert len(retry_sleeps) == 2
+    assert sum(retry_sleeps) > 0
+
+
+def test_gemini_falls_back_after_model_exhausts(monkeypatch, tmp_path):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if "model-b" not in request.full_url:
+            raise _http_error(request)
+        return _Response(b'{"candidates":[{"content":{"parts":[{"text":"2"}]}}]}')
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        m03_agreement, "GEMINI_MODEL_FALLBACKS", ("model-a", "model-b")
+    )
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
+    assert len(requests) == config.VLM_RETRY_MAX_ATTEMPTS + 1
+    assert "model-b" in requests[-1].full_url
+
+
+def test_gemini_honors_retry_after(monkeypatch, tmp_path):
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(request, headers={"Retry-After": "2"})
+        return _Response(b'{"candidates":[{"content":{"parts":[{"text":"1"}]}}]}')
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement, "GEMINI_MODEL_FALLBACKS", ("model-a",))
+    monkeypatch.setattr(m03_agreement.time, "sleep", sleeps.append)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    assert vlm_score_gemini(b"png", "seq", 0, 7) == 1
+    assert 2.0 in sleeps
+
+
+def test_gemini_400_skips_retries_and_tries_next_model(monkeypatch, tmp_path):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if len(requests) == 1:
+            raise _http_error(request, status=400, body=b"bad request")
+        return _Response(b'{"candidates":[{"content":{"parts":[{"text":"2"}]}}]}')
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        m03_agreement, "GEMINI_MODEL_FALLBACKS", ("model-a", "model-b")
+    )
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
+    assert len(requests) == 2
+    assert "model-b" in requests[1].full_url
+
+
+def test_gemini_exhausts_all_models(monkeypatch, tmp_path, caplog):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        raise _http_error(request)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    with caplog.at_level(logging.INFO):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert len(requests) == (
+        config.VLM_RETRY_MAX_ATTEMPTS * len(config.GEMINI_MODEL_FALLBACKS)
+    )
+    assert all(model in caplog.text for model in config.GEMINI_MODEL_FALLBACKS)
+    assert "Gemini scoring exhausted all 2 fallbacks for seq_id=seq, angle=0" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -228,7 +365,9 @@ def test_gemini_failures_are_excluded_from_agreement(monkeypatch, tmp_path):
     monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
     monkeypatch.setattr(
-        m03_agreement, "vlm_score_gemini", lambda *args: "STUB - no result"
+        m03_agreement,
+        "vlm_score_gemini",
+        lambda *args, **kwargs: "STUB - no result",
     )
 
     report = agreement_report(samples, view_degs=(0,), seed=7, backend="gemini")
@@ -242,5 +381,38 @@ def test_gemini_failures_are_excluded_from_agreement(monkeypatch, tmp_path):
     assert metrics["quadratic_weighted_cohen_kappa"] is None
 
 
+def test_gemini_agreement_failures_are_seeded_and_unavailable(
+    monkeypatch, tmp_path
+):
+    samples = make_synthetic_squats(2, 7)
+    sleep_runs = []
+
+    def fake_urlopen(request, timeout):
+        raise _http_error(request)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement, "render_keyframes_image", lambda _: b"png")
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    reports = []
+    for _ in range(2):
+        sleeps = []
+        monkeypatch.setattr(m03_agreement.time, "sleep", sleeps.append)
+        reports.append(
+            agreement_report(samples, view_degs=(0,), seed=7, backend="gemini")
+        )
+        sleep_runs.append(sleeps)
+
+    metrics = reports[0]["model_vs_clinician_reliability"]["0"]
+    assert reports[0] == reports[1]
+    assert sleep_runs[0] == sleep_runs[1]
+    assert metrics["n_scored"] == 0
+    assert metrics["n_stub"] == 2
+    assert metrics["cohen_kappa"] is None
+    assert metrics["quadratic_weighted_cohen_kappa"] is None
+
+
 def test_gemini_model_is_not_retired_flash_lite():
     assert config.GEMINI_MODEL_ID != "gemini-2.0-flash-lite"
+    assert config.GEMINI_MODEL_FALLBACKS[0] == config.GEMINI_MODEL_ID

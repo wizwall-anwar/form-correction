@@ -42,8 +42,17 @@ ABSTAIN_CONFIDENCE_THRESHOLD: Final[float] = 0.70
 VLM_BACKEND: Final[str] = "placeholder"
 VLM_TIMEOUT_S: Final[int] = 30
 GEMINI_MODEL_ID: Final[str] = "gemini-3.1-flash-lite"
+GEMINI_MODEL_FALLBACKS: Final[tuple[str, ...]] = (
+    GEMINI_MODEL_ID,
+    "gemini-2.5-flash-lite",
+)
+assert GEMINI_MODEL_FALLBACKS[0] == GEMINI_MODEL_ID
 VLM_CACHE_DIR: Final[str] = "results/vlm_cache"
 VLM_RATE_LIMIT_DELAY_S: Final[float] = 4.0
+VLM_RETRY_MAX_ATTEMPTS: Final[int] = 4
+VLM_RETRY_BASE_DELAY_S: Final[float] = 1.0
+VLM_RETRY_MAX_DELAY_S: Final[float] = 30.0
+VLM_RETRY_STATUSES: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
 VLM_ERROR_BODY_PREVIEW_CHARS: Final[int] = 200
 
 STANDARDIZED_JOINT_NAMES: Final[tuple[str, ...]] = (
