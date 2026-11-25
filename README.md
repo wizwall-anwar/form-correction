@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+HEAD
 # form-correction
 
 Squat form-feedback research prototype. See [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md), [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -17,7 +17,5 @@ python -m app.biocoach_demo --smoke-test
 ## Full run
 
 Open `kaggle_colab_runner.ipynb` on Kaggle or Colab.
-=======
-# form-correction
->>>>>>> 7e71a8e0653be67a4aba3e8d13106ee5824d8baf
+
 
