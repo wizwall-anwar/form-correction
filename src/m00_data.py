@@ -13,14 +13,14 @@ import json
 import logging
 import pickle
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
 import numpy as np
 
 from .config import (
-    CLINICIAN_SCORE_BIN_EDGES,
+    CLINICIAN_SCORE_BIN_QUANTILES,
     KIMORE_SCORE_COLUMN_CANDIDATES,
     KINECT_V2_TO_STANDARD_JOINT_MAP,
     NETWORK_TIMEOUT_S,
@@ -54,10 +54,30 @@ class Sample:
     data_source: Literal["manual", "fetched", "synthetic"]
 
 
-def _score_bin(score: Optional[float]) -> int:
-    if score is None:
-        return 0
-    return int(np.digitize(score, CLINICIAN_SCORE_BIN_EDGES, right=False))
+def assign_score_bins(samples: list[Sample]) -> list[Sample]:
+    """Return copies with bins derived from this dataset's non-missing scores.
+
+    Scores with fewer than three distinct values, such as UI-PRMD's binary
+    labels, use the ascending rank of each distinct value instead of degenerate
+    quantile cuts. Missing scores retain the historical placeholder bin zero.
+    """
+
+    scores = [float(sample.clinician_score) for sample in samples if sample.clinician_score is not None]
+    distinct_scores = sorted(set(scores))
+    if len(distinct_scores) < 3:
+        ranks = {score: rank for rank, score in enumerate(distinct_scores)}
+        return [
+            replace(sample, clinician_bin=ranks.get(sample.clinician_score, 0))
+            for sample in samples
+        ]
+    edges = np.quantile(scores, CLINICIAN_SCORE_BIN_QUANTILES)
+    return [
+        replace(
+            sample,
+            clinician_bin=0 if sample.clinician_score is None else int(np.digitize(sample.clinician_score, edges)),
+        )
+        for sample in samples
+    ]
 
 
 def _fetch_stub(timeout_s: float) -> None:
@@ -143,7 +163,7 @@ def _parse_kimore(root: Path) -> list[Sample]:
                 LOGGER.warning("Skipping KIMORE row %s in %s: %s", index, path, error)
                 continue
             subject_id = f"kimore_ex5_row_{index}"
-            samples.append(Sample(subject_id, subject_id, subject_id, "squat", joints, 30.0, score, _score_bin(score), {}, 0.0, False, "manual"))
+            samples.append(Sample(subject_id, subject_id, subject_id, "squat", joints, 30.0, score, 0, {}, 0.0, False, "manual"))
         return samples
     except Exception as error:
         LOGGER.warning("Skipping KIMORE file %s: %s", path, error)
@@ -194,7 +214,7 @@ def _parse_uiprmd(root: Path) -> list[Sample]:
             raw = values.reshape(values.shape[0], 22, 3)
             joints = np.stack([raw[:, slots[name]] for name in STANDARDIZED_JOINT_NAMES], axis=1)
             subject_id = f"uiprmd_s{match.group(2)}"
-            samples.append(Sample(subject_id, match.group(3), file_path.stem, "squat", joints, 30.0, UI_PRMD_LABELS[label], int(UI_PRMD_LABELS[label]), {}, 0.0, False, "manual"))
+            samples.append(Sample(subject_id, match.group(3), file_path.stem, "squat", joints, 30.0, UI_PRMD_LABELS[label], 0, {}, 0.0, False, "manual"))
     except (OSError, ValueError, IndexError) as error:
         LOGGER.warning("Skipping UI-PRMD data under %s: %s", root, error)
     if samples:
@@ -280,7 +300,7 @@ def make_synthetic_squats(n_subjects: int, seed: int) -> list[Sample]:
                 joints=joints,
                 fps=30.0,
                 clinician_score=score,
-                clinician_bin=_score_bin(score),
+                clinician_bin=0,
                 flags_3d={},
                 view_deg=0.0,
                 is_synthetic_view=False,
@@ -298,6 +318,7 @@ def load_data(data_dir: Optional[str] = None) -> list[Sample]:
         uiprmd_samples = load_uiprmd(data_dir=data_dir, timeout_s=NETWORK_TIMEOUT_S)
         if uiprmd_samples and uiprmd_samples[0].data_source != "synthetic":
             samples = uiprmd_samples
+    samples = assign_score_bins(samples)
     source = samples[0].data_source if samples else "synthetic"
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)

@@ -1,20 +1,28 @@
 """Train and evaluate a small subject-safe detector from kinematic flags.
 
-Inputs are ``Sample`` objects with standardized joints and clinician bins.
-Outputs are classifier predictions, calibration metrics, and risk-coverage data.
-This baseline exists as the offline detector; temporal deep learning is out of scope.
+Inputs are ``Sample`` objects with standardized joints and clinician scores.
+Outputs are held-out regression metrics, classifier calibration metrics, and
+risk-coverage data. These small NumPy baselines keep the offline evaluation
+reproducible; temporal deep learning is out of scope.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 
-from .config import ABSTAIN_CONFIDENCE_THRESHOLD
+from .config import (
+    ABSTAIN_CONFIDENCE_THRESHOLD,
+    BOOTSTRAP_RESAMPLES,
+    CLINICIAN_SCORE_BIN_QUANTILES,
+    RIDGE_ALPHA,
+    SELECTIVE_COVERAGES,
+)
 from .m00_data import Sample
-from .m01_features import kinematic_flags
+from .m01_features import flag_error, kinematic_flags
 
 
 class _NumpyLogisticRegression:
@@ -36,6 +44,22 @@ class _NumpyLogisticRegression:
         logits -= np.max(logits, axis=1, keepdims=True)
         probabilities = np.exp(logits)
         return probabilities / np.sum(probabilities, axis=1, keepdims=True)
+
+
+class _RidgeRegressor:
+    """Closed-form ridge model with training-set feature scaling."""
+
+    def __init__(self, weights: np.ndarray, mean: np.ndarray, scale: np.ndarray,
+                 target_mean: float) -> None:
+        self.weights = weights
+        self.mean = mean
+        self.scale = scale
+        self.target_mean = target_mean
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        standardized = (features - self.mean) / self.scale
+        design = np.column_stack((np.ones(len(features)), standardized))
+        return design @ self.weights
 
 
 def make_splits(samples: list[Sample], seed: int) -> tuple[list[Sample], list[Sample]]:
@@ -69,6 +93,146 @@ def extract_features(samples: list[Sample]) -> np.ndarray:
     keys = ("knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
     rows = [[kinematic_flags(sample.joints)[key] for key in keys] for sample in samples]
     return np.asarray(rows, dtype=float).reshape(-1, 3)
+
+
+def _features_from_flags(flags: list[dict]) -> np.ndarray:
+    keys = ("knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
+    return np.asarray([[row[key] for key in keys] for row in flags], dtype=float).reshape(-1, 3)
+
+
+def train_tertile_edges(train: list[Sample]) -> tuple[float, float]:
+    """Compute score-bin cuts from training-subject scores only."""
+
+    scores = np.asarray([sample.clinician_score for sample in train
+                         if sample.clinician_score is not None], dtype=float)
+    if not len(scores):
+        raise ValueError("cannot compute tertiles without clinician scores")
+    distinct = np.unique(scores)
+    if len(distinct) == 1:
+        return float("inf"), float("inf")
+    if len(distinct) == 2:
+        return float(np.mean(distinct)), float("inf")
+    edges = np.quantile(scores, CLINICIAN_SCORE_BIN_QUANTILES)
+    return float(edges[0]), float(edges[1])
+
+
+def rebin(samples: list[Sample], edges: tuple[float, float]) -> list[Sample]:
+    """Return copies with training-derived score bins applied."""
+
+    return [
+        replace(
+            sample,
+            clinician_bin=0 if sample.clinician_score is None
+            else int(np.digitize(sample.clinician_score, edges)),
+        )
+        for sample in samples
+    ]
+
+
+def train_regressor(train: list[Sample], seed: int) -> _RidgeRegressor:
+    """Fit closed-form ridge regression to raw clinician scores."""
+
+    del seed
+    scored = [sample for sample in train if sample.clinician_score is not None]
+    if not scored:
+        raise ValueError("cannot train on samples without clinician scores")
+    features = extract_features(scored)
+    targets = np.asarray([sample.clinician_score for sample in scored], dtype=float)
+    mean = np.mean(features, axis=0)
+    scale = np.std(features, axis=0)
+    scale[scale == 0.0] = 1.0
+    design = np.column_stack((np.ones(len(features)), (features - mean) / scale))
+    penalty = np.eye(design.shape[1]) * RIDGE_ALPHA
+    penalty[0, 0] = 0.0
+    weights = np.linalg.solve(design.T @ design + penalty, design.T @ targets)
+    return _RidgeRegressor(weights, mean, scale, float(np.mean(targets)))
+
+
+def predict_scores(model: _RidgeRegressor, samples: list[Sample]) -> list[float]:
+    """Predict raw clinician scores from the three flag measurements."""
+
+    return [float(value) for value in model.predict(extract_features(samples))]
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="stable")
+    ranks = np.empty(len(values), dtype=float)
+    start = 0
+    while start < len(values):
+        end = start + 1
+        while end < len(values) and values[order[end]] == values[order[start]]:
+            end += 1
+        ranks[order[start:end]] = (start + end - 1) / 2.0
+        start = end
+    return ranks
+
+
+def spearman_rho(a: list[float] | np.ndarray, b: list[float] | np.ndarray) -> float:
+    """Return Spearman rho with average tie ranks, or zero for a constant input."""
+
+    left = np.asarray(a, dtype=float)
+    right = np.asarray(b, dtype=float)
+    if left.shape != right.shape or not len(left):
+        raise ValueError("inputs must be non-empty and have matching shapes")
+    left_ranks = _average_ranks(left)
+    right_ranks = _average_ranks(right)
+    if np.ptp(left_ranks) == 0.0 or np.ptp(right_ranks) == 0.0:
+        return 0.0
+    return round(float(np.corrcoef(left_ranks, right_ranks)[0, 1]), 12)
+
+
+def mean_absolute_error(a: list[float] | np.ndarray,
+                        b: list[float] | np.ndarray) -> float:
+    """Return the mean absolute difference between matching values."""
+
+    left = np.asarray(a, dtype=float)
+    right = np.asarray(b, dtype=float)
+    if left.shape != right.shape or not len(left):
+        raise ValueError("inputs must be non-empty and have matching shapes")
+    return float(np.mean(np.abs(left - right)))
+
+
+def evaluate_regression(model: _RidgeRegressor, samples: list[Sample]) -> dict:
+    """Evaluate raw-score predictions and the training-mean MAE baseline."""
+
+    scored = [sample for sample in samples if sample.clinician_score is not None]
+    true = [float(sample.clinician_score) for sample in scored]
+    predicted = predict_scores(model, scored)
+    baseline = [model.target_mean] * len(scored)
+    return {
+        "spearman_rho": spearman_rho(true, predicted),
+        "mae": mean_absolute_error(true, predicted),
+        "mae_mean_baseline": mean_absolute_error(true, baseline),
+        "n": len(scored),
+    }
+
+
+def bootstrap_ci(true: list[float], pred: list[float], seed: int,
+                 subject_ids: list[str] | None = None) -> dict:
+    """Return deterministic percentile CIs by resampling whole test subjects."""
+
+    if len(true) != len(pred) or not true:
+        raise ValueError("true and pred must be non-empty and have matching lengths")
+    subjects = subject_ids or [str(index) for index in range(len(true))]
+    if len(subjects) != len(true):
+        raise ValueError("subject_ids must align with true and pred")
+    unique_subjects = list(dict.fromkeys(subjects))
+    rows_by_subject = {subject: [i for i, value in enumerate(subjects) if value == subject]
+                       for subject in unique_subjects}
+    rng = np.random.default_rng(seed)
+    rhos: list[float] = []
+    maes: list[float] = []
+    for _ in range(BOOTSTRAP_RESAMPLES):
+        drawn = rng.choice(unique_subjects, size=len(unique_subjects), replace=True)
+        indices = [index for subject in drawn for index in rows_by_subject[str(subject)]]
+        sampled_true = [true[index] for index in indices]
+        sampled_pred = [pred[index] for index in indices]
+        rhos.append(spearman_rho(sampled_true, sampled_pred))
+        maes.append(mean_absolute_error(sampled_true, sampled_pred))
+    return {
+        "spearman_rho_ci95": [float(value) for value in np.percentile(rhos, [2.5, 97.5])],
+        "mae_ci95": [float(value) for value in np.percentile(maes, [2.5, 97.5])],
+    }
 
 
 def train_baseline(train_samples: list[Sample], seed: int) -> Any:
@@ -179,6 +343,128 @@ def evaluate(predictions: list[dict], true_bins: list[int]) -> dict:
     }
 
 
+def selective_accuracy_at_coverage(
+    predictions: list[dict],
+    true_bins: list[int],
+    coverages: tuple[float, ...] = SELECTIVE_COVERAGES,
+) -> dict[str, float]:
+    """Return selective accuracy, not class precision, for top-confidence rows."""
+
+    if len(predictions) != len(true_bins):
+        raise ValueError("predictions and true_bins must align")
+    if not predictions:
+        return {str(coverage): 0.0 for coverage in coverages}
+    order = sorted(range(len(predictions)),
+                   key=lambda index: predictions[index]["confidence"], reverse=True)
+    results: dict[str, float] = {}
+    for coverage in coverages:
+        keep = min(len(order), max(1, int(np.ceil(coverage * len(order)))))
+        indices = order[:keep]
+        results[str(coverage)] = float(np.mean([
+            predictions[index]["pred_bin"] == true_bins[index] for index in indices
+        ]))
+    return results
+
+
+def _subject_ids(samples: list[Sample]) -> set[str]:
+    return {sample.subject_id for sample in samples}
+
+
+def run_evaluation(samples: list[Sample], flags_by_angle: dict, seed: int) -> dict:
+    """Run held-out regression and calibrated classification without subject leakage."""
+
+    train, test = make_splits(samples, seed)
+    fit, val = make_splits(train, seed)
+    train_subjects = _subject_ids(train)
+    test_subjects = _subject_ids(test)
+    fit_subjects = _subject_ids(fit)
+    val_subjects = _subject_ids(val)
+    assert len(train_subjects & test_subjects) == 0, "subject leakage between train and test"
+    assert len(fit_subjects & val_subjects) == 0, "subject leakage between fit and validation"
+    assert len(fit_subjects & test_subjects) == 0, "subject leakage between fit and test"
+    assert len(val_subjects & test_subjects) == 0, "subject leakage between validation and test"
+
+    edges = train_tertile_edges(train)
+    train_binned = rebin(train, edges)
+    fit_binned = rebin(fit, edges)
+    val_binned = rebin(val, edges)
+    test_binned = rebin(test, edges)
+
+    regressor = train_regressor(train_binned, seed)
+    subject_metrics = evaluate_regression(regressor, test_binned)
+    subject_true = [float(sample.clinician_score) for sample in test_binned
+                    if sample.clinician_score is not None]
+    subject_pred = predict_scores(
+        regressor,
+        [sample for sample in test_binned if sample.clinician_score is not None],
+    )
+    subject_ids = [sample.subject_id for sample in test_binned
+                   if sample.clinician_score is not None]
+    subject_metrics.update(bootstrap_ci(subject_true, subject_pred, seed, subject_ids))
+    subject_metrics["n_test"] = subject_metrics.pop("n")
+
+    classifier = calibrate(train_baseline(fit_binned, seed), val_binned)
+    test_predictions = predict_with_abstention(classifier, test_binned)
+    test_bins = [sample.clinician_bin for sample in test_binned]
+    classifier_metrics = evaluate(test_predictions, test_bins)
+    selective_risk = risk_coverage(test_predictions, test_bins)
+    selective_accuracy = selective_accuracy_at_coverage(test_predictions, test_bins)
+    class_counts = {str(label): int(test_bins.count(label)) for label in sorted(set(test_bins))}
+
+    clip_train, clip_test = make_clip_split(samples, seed)
+    clip_regressor = train_regressor(clip_train, seed)
+    clip_metrics = evaluate_regression(clip_regressor, clip_test)
+    clip_metrics = {
+        "spearman_rho": clip_metrics["spearman_rho"],
+        "mae": clip_metrics["mae"],
+        "n_test": clip_metrics["n"],
+    }
+
+    sample_indices = {id(sample): index for index, sample in enumerate(samples)}
+    test_indices = [sample_indices[id(sample)] for sample in test]
+    reference_flags = flags_by_angle.get(0)
+    if reference_flags is None or len(reference_flags) != len(samples):
+        raise ValueError("flags_by_angle[0] must align with samples")
+    table2_rows = []
+    for angle in sorted(flags_by_angle):
+        angle_flags = flags_by_angle[angle]
+        if len(angle_flags) != len(samples):
+            raise ValueError("each angle's flags must align with samples")
+        held_out_flags = [angle_flags[index] for index in test_indices]
+        angle_pred = [float(value) for value in regressor.predict(_features_from_flags(held_out_flags))]
+        errors = [
+            value
+            for index in test_indices
+            for value in flag_error(angle_flags[index], reference_flags[index]).values()
+        ]
+        table2_rows.append({
+            "angle": float(angle),
+            "spearman_rho": spearman_rho(subject_true, angle_pred),
+            "mae": mean_absolute_error(subject_true, angle_pred),
+            "flag_error": float(np.mean(errors)) if errors else 0.0,
+        })
+
+    sequence_counts = {
+        subject: sum(sample.subject_id == subject for sample in samples)
+        for subject in _subject_ids(samples)
+    }
+    all_predictions = predict_with_abstention(classifier, rebin(samples, edges))
+    return {
+        "subject_split": subject_metrics,
+        "clip_split": clip_metrics,
+        "ece": classifier_metrics["ece"],
+        "risk_coverage": selective_risk,
+        "selective_accuracy_at_coverage": selective_accuracy,
+        "test_class_counts": class_counts,
+        "table2_rows": table2_rows,
+        "max_sequences_per_subject": max(sequence_counts.values(), default=0),
+        "n_subjects": len(sequence_counts),
+        "n_sequences": len(samples),
+        "n_test": len(test_binned),
+        "predictions": all_predictions,
+    }
+
+
 def _smoke_samples() -> list[Sample]:
     """Build eight tiny labeled samples for the offline smoke test."""
 
@@ -195,7 +481,8 @@ def _smoke_samples() -> list[Sample]:
             joints[:, 5] = (0.2, 0.0, 0.0)
             joints[:, 6] = (0.0, 0.9, 0.0)
             joints[:, 7] = (0.0, 1.8, 0.0)
-            samples.append(Sample(f"s{subject}", None, f"q{subject}-{clip}", "squat", joints, 30.0, None, label, {}, 0.0, False, "synthetic"))
+            score = 0.5 + 0.07 * (subject * 2 + clip)
+            samples.append(Sample(f"s{subject}", None, f"q{subject}-{clip}", "squat", joints, 30.0, score, label, {}, 0.0, False, "synthetic"))
     return samples
 
 
@@ -206,14 +493,8 @@ if __name__ == "__main__":
     if args.smoke_test:
         try:
             samples = _smoke_samples()
-            train, test = make_splits(samples, 11)
-            held_out = sorted({sample.subject_id for sample in train})[-1]
-            fit = [sample for sample in train if sample.subject_id != held_out]
-            val = [sample for sample in train if sample.subject_id == held_out]
-            model = calibrate(train_baseline(fit, 11), val)
-            predictions = predict_with_abstention(model, test)
-            risk_coverage(predictions, [sample.clinician_bin for sample in test])
-            evaluate(predictions, [sample.clinician_bin for sample in test])
+            flags = [kinematic_flags(sample.joints) for sample in samples]
+            run_evaluation(samples, {0: flags}, 11)
             print("PASS")
         except Exception as error:
             print(f"FAIL: {error}")

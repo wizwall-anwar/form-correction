@@ -5,6 +5,7 @@ import sys
 import time
 import json
 import pickle
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,12 +14,38 @@ import pandas as pd
 from src.config import PRINCETON_CHECK_TIMEOUT_S, RANDOM_SEED, STANDARDIZED_JOINT_NAMES
 from src.m00_data import (
     Sample,
+    assign_score_bins,
     check_princeton_labels,
     load_kimore_ex5,
     load_data,
     load_uiprmd,
     make_synthetic_squats,
 )
+
+
+def test_score_bins_use_score_quantiles_not_absolute_probabilities() -> None:
+    samples = make_synthetic_squats(75, RANDOM_SEED)
+    scored = [replace(sample, clinician_score=float(score), clinician_bin=0)
+              for sample, score in zip(samples, np.linspace(0.5, 1.0, 75))]
+
+    binned = assign_score_bins(scored)
+
+    counts = np.bincount([sample.clinician_bin for sample in binned], minlength=3)
+    assert counts.min() >= 0.25 * len(binned)
+    assert all(original.clinician_bin == 0 for original in scored)
+
+
+def test_score_bins_rank_fewer_than_three_distinct_scores() -> None:
+    samples = make_synthetic_squats(3, RANDOM_SEED)
+    scored = [
+        replace(samples[0], clinician_score=1.0),
+        replace(samples[1], clinician_score=0.0),
+        replace(samples[2], clinician_score=None),
+    ]
+
+    binned = assign_score_bins(scored)
+
+    assert [sample.clinician_bin for sample in binned] == [1, 0, 0]
 
 
 def test_synthetic_sample_schema_and_shape() -> None:

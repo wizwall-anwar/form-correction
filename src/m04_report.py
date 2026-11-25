@@ -21,15 +21,24 @@ import matplotlib.pyplot as plt
 
 
 def build_table1(data_source: str, n_subjects: int, n_sequences: int,
-                subject_split_acc: float, clip_split_acc: float) -> dict:
-    """Build the dataset and split-accuracy summary table."""
+                 subject_split: dict, clip_split: dict,
+                 max_sequences_per_subject: int) -> dict:
+    """Build the dataset and regression split summary table."""
+
+    note = (
+        "Metrics use held-out subjects. KIMORE skeletons are Kinect-derived; "
+        "phone transfer untested; flags are measurements."
+    )
+    if max_sequences_per_subject == 1:
+        note += " The clip split equals the subject split on this data, so the leakage comparison is not informative."
     return {
         "data_source": data_source,
         "n_subjects": n_subjects,
         "n_sequences": n_sequences,
-        "subject_split_accuracy": subject_split_acc,
-        "clip_split_accuracy": clip_split_acc,
-        "note": "The clip split is intentionally leaky and shown only to illustrate the gap.",
+        "subject_split": subject_split,
+        "clip_split": clip_split,
+        "max_sequences_per_subject": max_sequences_per_subject,
+        "note": note,
     }
 
 
@@ -47,9 +56,17 @@ def build_table2(rows: list[dict]) -> dict:
     }
 
 
-def build_table3(ece: float, precision_at_coverage: dict, selective_risk: dict) -> dict:
+def build_table3(ece: float, selective_accuracy_at_coverage: dict,
+                 selective_risk: dict, n_test: int | None = None,
+                 test_class_counts: dict | None = None) -> dict:
     """Build the calibration and abstention summary from supplied metrics."""
-    return {"ece": ece, "precision_at_coverage": precision_at_coverage, "selective_risk": selective_risk}
+    return {
+        "ece": ece,
+        "selective_accuracy_at_coverage": selective_accuracy_at_coverage,
+        "selective_risk": selective_risk,
+        "n_test": n_test,
+        "test_class_counts": test_class_counts,
+    }
 
 
 def build_table4(kappa_report: dict, hallucination_rates: dict) -> dict:
@@ -119,9 +136,13 @@ def _smoke_test() -> bool:
     """Exercise report formatting and file outputs with small offline inputs."""
     with tempfile.TemporaryDirectory() as temporary:
         results = Path(temporary)
-        build_table1("synthetic", 2, 4, 0.5, 0.9)
-        build_table2([{"angle": angle, "accuracy": 0.5} for angle in (0, 15, 30, 45, 60)])
-        build_table3(0.1, {0.5: 0.8}, {"coverage": [0.5], "risk": [0.2]})
+        subject = {"spearman_rho": 0.5, "mae": 0.1, "spearman_rho_ci95": [0.1, 0.8],
+                   "mae_ci95": [0.05, 0.2], "mae_mean_baseline": 0.2, "n_test": 1}
+        clip = {"spearman_rho": 0.4, "mae": 0.2, "n_test": 1}
+        build_table1("synthetic", 2, 4, subject, clip, 2)
+        build_table2([{"angle": angle, "spearman_rho": 0.5, "mae": 0.1,
+                       "flag_error": float(angle)} for angle in (0, 15, 30, 45, 60)])
+        build_table3(0.1, {"0.5": 0.8}, {"coverage": [0.5], "risk": [0.2]}, 1, {"0": 1})
         build_table4({"0": {"cohen_kappa": 0.1}, "45": {"cohen_kappa": 0.2}}, {"free_form": 0.1})
         figure = make_risk_coverage_figure([0.5, 1.0], [0.2, 0.3], str(results / "figure.png"))
         assert Path(figure).is_file()

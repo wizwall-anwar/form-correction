@@ -1,5 +1,13 @@
+"""Test offline agreement metrics, Gemini requests, and failure reporting."""
+
+import io
+import logging
+import urllib.error
+
 import numpy as np
 
+from src import config
+from src import m03_agreement
 from src.m00_data import make_synthetic_squats
 from src.m03_agreement import (
     agreement_report,
@@ -7,8 +15,27 @@ from src.m03_agreement import (
     fleiss_kappa,
     render_keyframes,
     render_keyframes_image,
+    vlm_score_gemini,
     vlm_score_with_timeout,
 )
+
+
+class _Response:
+    """Provide the small urlopen response interface used by the Gemini client."""
+
+    status = 200
+
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self.body
 
 
 def test_cohen_kappa_matches_hand_computed_value():
@@ -50,3 +77,72 @@ def test_agreement_report_describes_reliability_without_validity_claims():
 
     assert "model_vs_clinician_reliability" in report
     assert all("validity" not in str(key).lower() for key in keys(report))
+
+
+def test_gemini_parses_digit_and_sends_key_only_in_header(monkeypatch, tmp_path):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return _Response(b'{"candidates":[{"content":{"parts":[{"text":"2"}]}}]}')
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
+    assert requests[0].get_header("X-goog-api-key") == "test-secret"
+    assert "test-secret" not in requests[0].full_url
+
+
+def test_gemini_http_404_returns_stub_and_logs_without_key(
+    monkeypatch, tmp_path, caplog
+):
+    api_key = "never-log-this-key"
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'model retired'),
+        )
+
+    monkeypatch.setenv("GEMINI_API_KEY", api_key)
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(m03_agreement.urllib.request, "urlopen", fake_urlopen)
+
+    with caplog.at_level(logging.WARNING):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert "404" in caplog.text
+    assert "model retired" in caplog.text
+    assert api_key not in caplog.text
+    assert not list(tmp_path.iterdir())
+
+
+def test_gemini_failures_are_excluded_from_agreement(monkeypatch, tmp_path):
+    samples = make_synthetic_squats(3, 7)
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        m03_agreement, "vlm_score_gemini", lambda *args: "STUB - no result"
+    )
+
+    report = agreement_report(samples, view_degs=(0,), seed=7, backend="gemini")
+    metrics = report["model_vs_clinician_reliability"]["0"]
+
+    assert metrics["n_stub"] == metrics["sample_count"] == len(samples)
+    assert metrics["n_scored"] == 0
+    assert metrics["vlm_bins"] == []
+    assert metrics["clinician_bins"] == []
+    assert metrics["cohen_kappa"] is None
+    assert metrics["quadratic_weighted_cohen_kappa"] is None
+
+
+def test_gemini_model_is_not_retired_flash_lite():
+    assert config.GEMINI_MODEL_ID != "gemini-2.0-flash-lite"

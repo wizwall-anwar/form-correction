@@ -27,8 +27,11 @@ KIMORE_SCORE_COLUMN_CANDIDATES: Final[tuple[str, ...]] = (
 UI_PRMD_SQUAT_MOVEMENT_CODE: Final[str] = "01"
 UI_PRMD_LABELS: Final[dict[str, float]] = {"correct": 1.0, "incorrect": 0.0}
 
-# Fixed quantile probabilities: compute score tertiles on the training split only.
-CLINICIAN_SCORE_BIN_EDGES: Final[tuple[float, float]] = (1 / 3, 2 / 3)
+# Tertile cuts are quantiles of clinician scores from TRAIN subjects only.
+CLINICIAN_SCORE_BIN_QUANTILES: Final[tuple[float, float]] = (1 / 3, 2 / 3)
+RIDGE_ALPHA: Final[float] = 1.0
+BOOTSTRAP_RESAMPLES: Final[int] = 1000
+SELECTIVE_COVERAGES: Final[tuple[float, ...]] = (0.5, 0.8, 1.0)
 
 # Fit and validate these deterministic flag thresholds on train-split subjects only, never test subjects.
 KNEE_DEPTH_FLEXION_THRESHOLD_DEG: Final[float] = 90.0
@@ -38,9 +41,10 @@ SYMMETRY_KNEE_ANGLE_DIFF_THRESHOLD_DEG: Final[float] = 15.0
 ABSTAIN_CONFIDENCE_THRESHOLD: Final[float] = 0.70
 VLM_BACKEND: Final[str] = "placeholder"
 VLM_TIMEOUT_S: Final[int] = 30
-GEMINI_MODEL_ID: Final[str] = "gemini-2.0-flash-lite"
+GEMINI_MODEL_ID: Final[str] = "gemini-3.1-flash-lite"
 VLM_CACHE_DIR: Final[str] = "results/vlm_cache"
 VLM_RATE_LIMIT_DELAY_S: Final[float] = 4.0
+VLM_ERROR_BODY_PREVIEW_CHARS: Final[int] = 200
 
 STANDARDIZED_JOINT_NAMES: Final[tuple[str, ...]] = (
     "hip_left",

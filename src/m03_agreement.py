@@ -16,6 +16,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -29,6 +30,7 @@ from .config import (
     RANDOM_SEED,
     VLM_BACKEND,
     VLM_CACHE_DIR,
+    VLM_ERROR_BODY_PREVIEW_CHARS,
     VLM_RATE_LIMIT_DELAY_S,
     VLM_TIMEOUT_S,
 )
@@ -55,6 +57,9 @@ _GEMINI_PROMPT = (
     "2 = good form\n"
     "Respond with ONLY the digit 0, 1, or 2."
 )
+
+_LOGGER = logging.getLogger(__name__)
+_STUB_RESULT = "STUB - no result"
 
 
 def render_keyframes(joints: np.ndarray) -> list[np.ndarray]:
@@ -122,7 +127,10 @@ def vlm_score_gemini(
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        return "STUB - no API key"
+        _LOGGER.warning(
+            "Gemini scoring failed; HTTP status=unavailable; response body=<unavailable>"
+        )
+        return _STUB_RESULT
 
     cache_dir = Path(VLM_CACHE_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +146,7 @@ def vlm_score_gemini(
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL_ID}:generateContent?key={api_key}"
+        f"{GEMINI_MODEL_ID}:generateContent"
     )
     payload = json.dumps({
         "contents": [{"parts": [
@@ -152,23 +160,44 @@ def vlm_score_gemini(
 
     req = urllib.request.Request(
         url, data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
         method="POST",
     )
+    status: int | str = "unavailable"
+    response_body = ""
     try:
         with urllib.request.urlopen(req, timeout=VLM_TIMEOUT_S) as resp:
-            result = json.loads(resp.read())
+            status = getattr(resp, "status", "unavailable")
+            response_body = resp.read().decode("utf-8", errors="replace")
+        result = json.loads(response_body)
         text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        bin_val = int(text[0]) if text and text[0].isdigit() else -1
-        if bin_val not in (0, 1, 2):
-            return "STUB - no result"
+        if text not in ("0", "1", "2"):
+            raise ValueError("Gemini response was not a score digit")
+        bin_val = int(text)
         cache_file.write_text(json.dumps({
             "bin": bin_val, "raw": text,
             "seq_id": str(seq_id), "angle": float(angle),
         }))
         return bin_val
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            response_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            response_body = ""
     except Exception:
-        return "STUB - no result"
+        pass
+
+    preview = response_body.replace(api_key, "[REDACTED]")[:VLM_ERROR_BODY_PREVIEW_CHARS]
+    _LOGGER.warning(
+        "Gemini scoring failed; HTTP status=%s; response body=%s",
+        status,
+        preview or "<unavailable>",
+    )
+    return _STUB_RESULT
 
 
 def vlm_score_with_timeout(
@@ -268,6 +297,7 @@ def agreement_report(
     for angle in view_degs:
         model_bins: list[int] = []
         clinician_bins: list[int] = []
+        n_stub = 0
         for index, sample in enumerate(samples):
             rotated = rotate_view(sample.joints, angle)
             keyframes = render_keyframes(rotated)
@@ -279,17 +309,23 @@ def agreement_report(
                 score = vlm_score_with_timeout(keyframes, seed + index)
 
             if isinstance(score, str):
+                n_stub += 1
                 continue
             model_bins.append(score)
             clinician_bins.append(int(sample.clinician_bin))
 
         metrics: dict = {
-            "sample_count": len(model_bins),
+            "sample_count": len(samples) if backend == "gemini" else len(model_bins),
+            "n_scored": len(model_bins),
+            "n_stub": n_stub,
             "vlm_bins": model_bins,
             "clinician_bins": clinician_bins,
             "backend": backend,
         }
-        if model_bins:
+        if backend == "gemini" and len(model_bins) < 2:
+            metrics["cohen_kappa"] = None
+            metrics["quadratic_weighted_cohen_kappa"] = None
+        elif model_bins:
             metrics["cohen_kappa"] = cohen_kappa(model_bins, clinician_bins)
             metrics["quadratic_weighted_cohen_kappa"] = cohen_kappa(
                 model_bins, clinician_bins, weights="quadratic"
