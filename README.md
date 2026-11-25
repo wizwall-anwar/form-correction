@@ -1,4 +1,3 @@
-HEAD
 # form-correction
 
 Squat form-feedback research prototype. See [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md), [ARCHITECTURE.md](ARCHITECTURE.md).
