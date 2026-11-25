@@ -88,8 +88,11 @@
 - The 95% CI never crosses zero → **consistent inversion**, not noise.
 - Also fails the "beat the average" test: MAE 0.075 > 0.069 (mean baseline).
 - Pre-registered pivot criterion (DECISIONS §6): *"Learned detector fails to beat the simple flag/classical baseline on held-out subjects → report the baseline as the finding."* **Triggered.**
-- Suspected mechanism: clinicians reward *controlled* form; flags reward *motion magnitude* (deeper + some lean + some asymmetry). A linear mixture trades against itself on the compressed top-quartile score band.
-- **Per-flag diagnostic wired for next run** (`per_flag_subject_split`, patch A): will decompose ρ per flag and pin down which one carries positive signal that the mixed model cancels.
+- **Per-flag diagnostic (patch A, verified 2026-11-25 Kaggle run):**
+  - `trunk_lean_max_deg`: ρ = **+0.539** (strongest single-flag predictor)
+  - `knee_flexion_max_deg`: ρ = +0.216
+  - `symmetry_diff_deg`: ρ = −0.189
+- Mechanism (confirmed): individual flags carry reasonable signal; the ridge mixture *fights* the sign of the strongest one under small-training-sample + feature-collinearity conditions. A univariate model on trunk lean alone would likely beat the three-flag ridge.
 
 **Speaker notes:** This is the single most important slide in the deck. Do not undersell it. The contribution of a graduate creative-component is a thing that moves the knowledge frontier — here, that a naively-mixed ridge on three deterministic kinematic flags does not predict KIMORE Ex5 clinician scores on held-out subjects, and does so in a measurable direction with pre-registered reporting rules. The per-flag diagnostic (patch A, wired this week) is the next experiment, not spin.
 
@@ -181,7 +184,7 @@
 - Framed strictly as **model-vs-clinician reliability**, never validity.
 - m03 shipped: `GEMINI_MODEL_FALLBACKS` walk (`gemini-3.1-flash-lite` → `gemini-2.5-flash-lite`), `Retry-After` honored, exponential backoff + jitter, on-disk cache under `results/vlm_cache/`, `STUB — no result` excluded from κ (never substituted), API key only in `x-goog-api-key` header with log redaction.
 - **Hallucination rates are a verifier control, not a measurement.** `{"free_form": 2.0, "grounded": 0.0}` carries the explicit caption *"free_form is a PLANTED fabricated control string (999/888), not VLM output."* The planted string lives in notebook cell 14, not in m03. A real free-form-vs-grounded hallucination measurement needs actual free-form VLM text under the same prompt and is listed as future work.
-- **Detector-vs-clinician κ comparison row wired for next run** (`detector_vs_clinician_kappa`, patch B): gives a non-zero baseline for the VLM κ to be compared against instead of just zero.
+- **Detector-vs-clinician κ comparison row (patch B, verified 2026-11-25 Kaggle run):** Cohen's κ = **0.000** (quadratic-weighted κ = 0.000) on all 75 samples. The flag-based classifier agrees with clinicians *at chance*. This puts Gemini's κ ≈ ±0.14 in context: Gemini is marginally above the flag-classifier baseline but still statistically near zero. Neither flag-based nor VLM-based approach shows meaningful ordinal agreement with clinician scores on this sample.
 - **Fleiss' κ for VLM self-consistency** demoted to future work (no repeated-run data on the Gemini backend in the current bundle).
 
 **Speaker notes:** The 20 and 40 stubbed samples at 0° and 45° are the sticking point — Gemini returned 503 UNAVAILABLE on them even after the retry-and-fallback chain. The right off-peak re-run will mostly resolve those via the on-disk cache (every successful sample is already cached by `(seq_id, angle, seed)`), tightening 45° toward n ≈ 55+. Do not re-interpret the sign flip at these sample sizes.
@@ -210,8 +213,8 @@
 - A measured free-form-vs-grounded hallucination rate (current rates are a verifier control on a planted string).
 
 **Next steps (in priority order):**
-1. Run notebook cells 1–5 and 8 (no Gemini needed) to populate `per_flag_subject_split` and `detector_vs_clinician_kappa` — this pins down the §4.2 mechanism.
-2. Non-linear detector (GBM on same three flags) or smoothness-encoding features (joint velocities, hip-knee coupling, trunk-knee phase) to test the "flags reward magnitude, clinicians reward control" hypothesis.
+1. **Univariate baseline on `trunk_lean_max_deg` alone** — the per-flag diagnostic (slide 5) shows this single flag has ρ = +0.54 on held-out subjects, stronger than the three-flag ridge mixture (ρ = −0.52). If a one-coefficient ridge on trunk-lean beats the three-flag ridge, the inversion is a pure linear-mixture pathology; if it doesn't, the follow-up is a non-linear model (GBM) on the same three flags.
+2. Engineered features: joint velocities, hip-knee coupling, trunk-knee phase, cross-rep variance.
 3. BlazePose on KIMORE RGB to probe Kinect-to-phone transfer.
 4. Collect actual free-form VLM critique text to replace the planted 999/888 control with a measured hallucination rate.
 
