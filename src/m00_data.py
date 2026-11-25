@@ -151,14 +151,20 @@ def _parse_kimore(root: Path) -> list[Sample]:
 
 
 def _parse_uiprmd(root: Path) -> list[Sample]:
-    """Parse Kinect UI-PRMD deep-squat position files.
+    """Parse segmented Kinect deep-squat positions using the paper's Table 2 order.
 
-    The exact column-to-joint identity is unverified, so the first joint
-    triplets are used positionally; flags should not be trusted like KIMORE's
-    named-joint data.
+    The 22 triples are Kinect/Brekel joint positions, not Kinect v2's 25-joint
+    order. Segment names such as ``upper leg`` are anatomical approximations
+    for the standardized landmark slots; no Vicon or angle columns are used.
     """
     samples: list[Sample] = []
-    pattern = re.compile(r"m(\d{2})_s(\d{2})_e(\d{2})_positions\.txt$", re.IGNORECASE)
+    # One-based Table 2 rows: Waist, Spine, Left/Right Collar, Upper leg,
+    # Lower leg, Foot. See https://pmc.ncbi.nlm.nih.gov/articles/PMC5773117/#T2
+    slots = {"spine_base": 0, "spine_mid": 1, "shoulder_left": 6,
+             "shoulder_right": 10, "hip_left": 14, "knee_left": 15,
+             "ankle_left": 16, "hip_right": 18, "knee_right": 19,
+             "ankle_right": 20}
+    pattern = re.compile(r"m(\d{2})_s(\d{2})_e(\d{2})_positions(_inc)?\.txt$", re.IGNORECASE)
     try:
         dataset_root = root / "UI-PRMD"
         for file_path in sorted(dataset_root.rglob("*.txt")):
@@ -166,25 +172,33 @@ def _parse_uiprmd(root: Path) -> list[Sample]:
             match = pattern.fullmatch(file_path.name)
             if match is None or match.group(1) != UI_PRMD_SQUAT_MOVEMENT_CODE:
                 continue
-            if len(relative) != 4 or relative[1] != "kinect" or relative[2] != "positions":
+            if "kinect" not in relative[:-1] or "positions" not in relative[:-1]:
                 continue
-            label = relative[0]
-            if label not in UI_PRMD_LABELS:
+            if not any("segmented" in part for part in relative[:-1]):
+                # Also accept the older Correct/Kinect/Positions mirror layout.
+                if "correct" not in relative[:-1] and "incorrect" not in relative[:-1]:
+                    continue
+            incorrect = bool(match.group(4)) or any("incorrect" in part for part in relative[:-1])
+            if bool(match.group(4)) != any("incorrect" in part for part in relative[:-1]) and any(
+                part in ("correct", "incorrect") for part in relative[:-1]
+            ) and bool(match.group(4)):
+                LOGGER.warning("Skipping UI-PRMD file %s: conflicting correctness labels", file_path)
                 continue
+            label = "incorrect" if incorrect else "correct"
             values = np.genfromtxt(file_path, delimiter=",", dtype=np.float32)
             if values.ndim == 1:
                 values = values.reshape(1, -1)
-            required_columns = len(STANDARDIZED_JOINT_NAMES) * 3
-            if values.ndim != 2 or values.shape[1] < required_columns:
-                LOGGER.warning("Skipping UI-PRMD file %s: fewer than %s numeric columns", file_path, required_columns)
+            if values.ndim != 2 or values.shape[1] != 66 or not np.isfinite(values).all():
+                LOGGER.warning("Skipping UI-PRMD file %s: expected finite T x 66 Kinect positions", file_path)
                 continue
-            joints = values[:, :required_columns].reshape(values.shape[0], len(STANDARDIZED_JOINT_NAMES), 3)
+            raw = values.reshape(values.shape[0], 22, 3)
+            joints = np.stack([raw[:, slots[name]] for name in STANDARDIZED_JOINT_NAMES], axis=1)
             subject_id = f"uiprmd_s{match.group(2)}"
             samples.append(Sample(subject_id, match.group(3), file_path.stem, "squat", joints, 30.0, UI_PRMD_LABELS[label], int(UI_PRMD_LABELS[label]), {}, 0.0, False, "manual"))
     except (OSError, ValueError, IndexError) as error:
         LOGGER.warning("Skipping UI-PRMD data under %s: %s", root, error)
     if samples:
-        LOGGER.warning("UI-PRMD joint-column identity is unverified; flags from it should not be trusted like KIMORE named-joint data")
+        LOGGER.warning("UI-PRMD Kinect Table 2 segment-to-landmark mapping is approximate; labels are simulated correct/incorrect, not clinician scores")
     return samples
 
 

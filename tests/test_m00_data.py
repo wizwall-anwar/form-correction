@@ -99,6 +99,25 @@ def test_load_uiprmd_reads_real_layout_and_groups_subjects(tmp_path: Path) -> No
     assert [sample.clinician_score for sample in samples].count(1.0) == 2
     assert [sample.clinician_score for sample in samples].count(0.0) == 1
     assert all(sample.data_source == "manual" for sample in samples)
+    # Table 2's left lower leg is the 16th triplet, not the third triplet.
+    knee = STANDARDIZED_JOINT_NAMES.index("knee_left")
+    assert np.array_equal(samples[0].joints[0, knee], [45, 46, 47])
+
+
+def test_uiprmd_zenodo_archive_layout_and_invalid_width(tmp_path: Path) -> None:
+    base = tmp_path / "UI-PRMD"
+    correct = base / "Segmented Movements" / "Kinect" / "Positions"
+    incorrect = base / "Incorrect Segmented Movements" / "Kinect" / "Positions"
+    correct.mkdir(parents=True)
+    incorrect.mkdir(parents=True)
+    values = ",".join(str(value) for value in range(66))
+    (correct / "m01_s01_e01_positions.txt").write_text(values, encoding="utf-8")
+    (incorrect / "m01_s01_e02_positions_inc.txt").write_text(values, encoding="utf-8")
+    (correct / "m01_s02_e01_positions.txt").write_text(values + ",66", encoding="utf-8")
+    samples = load_uiprmd(str(tmp_path))
+    assert len(samples) == 2
+    assert {sample.subject_id for sample in samples} == {"uiprmd_s01"}
+    assert {sample.clinician_score for sample in samples} == {0.0, 1.0}
 
 
 def test_garbage_data_dir_uses_synthetic_fallback(tmp_path: Path) -> None:
