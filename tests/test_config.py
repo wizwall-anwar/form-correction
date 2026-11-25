@@ -10,7 +10,7 @@ from src.config import (
     STANDARDIZED_JOINT_NAMES,
     SYMMETRY_KNEE_ANGLE_DIFF_THRESHOLD_DEG,
     TRUNK_LEAN_MAX_ANGLE_DEG,
-    _find_kaggle_dataset_dir,
+    _find_dataset_root,
 )
 
 
@@ -28,9 +28,28 @@ def test_config_constants_cover_required_values() -> None:
     )
 
 
-def test_find_kaggle_dataset_dir_scans_immediate_mounts(tmp_path: Path) -> None:
-    (tmp_path / "ignored" / "nested" / "KiMoRe").mkdir(parents=True)
-    expected = tmp_path / "user-chosen-slug"
-    (expected / "UI-PRMD").mkdir(parents=True)
+def test_find_dataset_root_handles_data_wrapper(tmp_path: Path) -> None:
+    expected = tmp_path / "data"
+    (expected / "KiMoRe").mkdir(parents=True)
 
-    assert _find_kaggle_dataset_dir(tmp_path) == str(expected)
+    assert _find_dataset_root(tmp_path) == str(expected)
+
+
+def test_find_dataset_root_handles_deep_kaggle_layout(tmp_path: Path) -> None:
+    expected = tmp_path / "datasets" / "user" / "dataset-name" / "data"
+    (expected / "KiMoRe").mkdir(parents=True)
+
+    assert _find_dataset_root(tmp_path) == str(expected)
+
+
+def test_find_dataset_root_stops_at_max_depth(tmp_path: Path) -> None:
+    too_deep = tmp_path / "one" / "two" / "three"
+    (too_deep / "KiMoRe").mkdir(parents=True)
+
+    assert _find_dataset_root(tmp_path, max_depth=2) is None
+
+
+def test_find_dataset_root_accepts_base_itself(tmp_path: Path) -> None:
+    (tmp_path / "UI-PRMD").mkdir()
+
+    assert _find_dataset_root(tmp_path) == str(tmp_path)

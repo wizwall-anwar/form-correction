@@ -82,14 +82,19 @@ KINECT_V2_TO_STANDARD_JOINT_MAP: Final[dict[str, str]] = {
 }
 
 
-def _find_kaggle_dataset_dir(base: Path) -> Optional[str]:
-    """Return the first Kaggle dataset mount containing a supported dataset."""
+def _find_dataset_root(base: Path, max_depth: int = 5) -> Optional[str]:
+    """Return the first nearby directory containing a supported dataset."""
 
     if not base.is_dir():
         return None
-    for child in sorted(base.iterdir()):
-        if child.is_dir() and any((child / name).is_dir() for name in ("KiMoRe", "UI-PRMD")):
-            return str(child)
+    for root, directories, _ in os.walk(base):
+        directories.sort()
+        root_path = Path(root)
+        depth = len(root_path.relative_to(base).parts)
+        if any((root_path / name).is_dir() for name in ("KiMoRe", "UI-PRMD")):
+            return str(root_path)
+        if depth >= max_depth:
+            directories.clear()
     return None
 
 
@@ -97,9 +102,9 @@ def resolve_data_dir(data_dir: Optional[str] = None) -> Optional[str]:
     """Resolve an existing local dataset directory without touching the network.
 
     Inputs are an optional explicit path and the ``FORM_CORRECTION_DATA_DIR``
-    environment variable. Outputs are the first existing path among those,
-    common Colab paths, and Kaggle dataset mounts, or ``None``. Kaggle discovery
-    lists only ``/kaggle/input``'s immediate children; it never downloads or
+    environment variable. Outputs are the first directory containing a supported
+    dataset under those paths, common Colab paths, and Kaggle dataset mounts, or
+    ``None``. Discovery descends at most five levels and never downloads or
     modifies any filesystem.
     """
 
@@ -108,9 +113,12 @@ def resolve_data_dir(data_dir: Optional[str] = None) -> Optional[str]:
         (
             "/content/drive/MyDrive/form-correction-data",
             "/content/data",
+            "/kaggle/input",
         )
     )
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return str(Path(candidate))
-    return _find_kaggle_dataset_dir(Path("/kaggle/input"))
+        if candidate:
+            dataset_root = _find_dataset_root(Path(candidate))
+            if dataset_root is not None:
+                return dataset_root
+    return None
