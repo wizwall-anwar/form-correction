@@ -38,6 +38,9 @@ SYMMETRY_KNEE_ANGLE_DIFF_THRESHOLD_DEG: Final[float] = 15.0
 ABSTAIN_CONFIDENCE_THRESHOLD: Final[float] = 0.70
 VLM_BACKEND: Final[str] = "placeholder"
 VLM_TIMEOUT_S: Final[int] = 30
+GEMINI_MODEL_ID: Final[str] = "gemini-2.0-flash-lite"
+VLM_CACHE_DIR: Final[str] = "results/vlm_cache"
+VLM_RATE_LIMIT_DELAY_S: Final[float] = 4.0
 
 STANDARDIZED_JOINT_NAMES: Final[tuple[str, ...]] = (
     "hip_left",

@@ -5,6 +5,8 @@ from src.m03_agreement import (
     agreement_report,
     cohen_kappa,
     fleiss_kappa,
+    render_keyframes,
+    render_keyframes_image,
     vlm_score_with_timeout,
 )
 
@@ -23,6 +25,17 @@ def test_vlm_stub_returns_int_or_explicit_no_result():
     result = vlm_score_with_timeout(keyframes, seed=7)
     assert isinstance(result, (int, str))
     assert result == "STUB - no result" or result in (0, 1, 2)
+
+
+def test_render_keyframes_image_returns_png_bytes():
+    joints = np.zeros((3, 10, 3), dtype=float)
+    joints[:, 0] = (-0.2, 1.0, 0.0)
+    joints[:, 1] = (0.2, 1.0, 0.0)
+    joints[1, :4, 1] = -1.0
+    keyframes = render_keyframes(joints)
+    image = render_keyframes_image(keyframes)
+    assert isinstance(image, bytes)
+    assert image[:4] == b"\x89PNG"
 
 
 def test_agreement_report_describes_reliability_without_validity_claims():

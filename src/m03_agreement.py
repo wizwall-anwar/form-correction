@@ -1,23 +1,60 @@
-"""Compute offline VLM-versus-clinician agreement from skeleton sequences.
+"""Compute VLM-versus-clinician agreement from skeleton sequences.
 
 Inputs are ``Sample`` objects with [T, J, 3] joints and clinician bins;
-outputs are coordinate keyframes, deterministic placeholder scores, kappa
-statistics, and bootstrap intervals. This module is offline: rotated views are
-SYNTHETIC, and no real VLM or image renderer is called. The report is NEVER
-"validity"; it measures only model-vs-clinician reliability and never claims
-that a VLM equals human PT ground truth.
+outputs are stick-figure images, VLM score bins, kappa statistics, and
+bootstrap intervals. Views are SYNTHETIC. When a Gemini API key is set
+(env var ``GEMINI_API_KEY``) results use a real VLM; otherwise a
+deterministic hash stub runs. The report measures model-vs-clinician
+reliability, never "validity", and never claims a VLM equals human PT
+ground truth.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import io
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 import numpy as np
 
-from .config import RANDOM_SEED, VLM_BACKEND, VLM_TIMEOUT_S
+from .config import (
+    GEMINI_MODEL_ID,
+    RANDOM_SEED,
+    VLM_BACKEND,
+    VLM_CACHE_DIR,
+    VLM_RATE_LIMIT_DELAY_S,
+    VLM_TIMEOUT_S,
+)
 from .m00_data import Sample
 from .m01_features import project_2d, rotate_view
+
+_STICK_CONNECTIONS = [
+    (6, 7),  # spine_base -> spine_mid
+    (7, 8),  # spine_mid -> shoulder_left
+    (7, 9),  # spine_mid -> shoulder_right
+    (6, 0),  # spine_base -> hip_left
+    (6, 1),  # spine_base -> hip_right
+    (0, 2),  # hip_left -> knee_left
+    (2, 4),  # knee_left -> ankle_left
+    (1, 3),  # hip_right -> knee_right
+    (3, 5),  # knee_right -> ankle_right
+]
+
+_GEMINI_PROMPT = (
+    "Three stick-figure keyframes of a squat: start, bottom, end.\n"
+    "Rate movement quality as a single digit:\n"
+    "0 = poor form (shallow depth, excessive lean, or asymmetry)\n"
+    "1 = moderate form\n"
+    "2 = good form\n"
+    "Respond with ONLY the digit 0, 1, or 2."
+)
 
 
 def render_keyframes(joints: np.ndarray) -> list[np.ndarray]:
@@ -33,16 +70,41 @@ def render_keyframes(joints: np.ndarray) -> list[np.ndarray]:
     return [project_2d(array[index : index + 1])[0].copy() for index in indices]
 
 
+def render_keyframes_image(keyframes: list[np.ndarray]) -> bytes:
+    """Render 2D keyframes as a stick-figure triptych PNG."""
+
+    import matplotlib
+    try:
+        matplotlib.use("Agg")
+    except Exception:
+        pass
+    import matplotlib.pyplot as plt
+
+    titles = ["Start", "Bottom", "End"]
+    fig, axes = plt.subplots(1, len(keyframes), figsize=(3 * len(keyframes), 4))
+    if len(keyframes) == 1:
+        axes = [axes]
+    for idx, (ax, kf) in enumerate(zip(axes, keyframes)):
+        for i, j in _STICK_CONNECTIONS:
+            if i < len(kf) and j < len(kf):
+                ax.plot([kf[i, 0], kf[j, 0]], [kf[i, 1], kf[j, 1]], "b-", linewidth=2)
+        ax.scatter(kf[:, 0], kf[:, 1], c="red", s=30, zorder=5)
+        ax.set_aspect("equal")
+        ax.invert_yaxis()
+        ax.set_title(titles[min(idx, 2)])
+        ax.axis("off")
+    fig.suptitle("Squat keyframes (SYNTHETIC view)", fontsize=10)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 def vlm_score_stub(keyframes: list[np.ndarray], seed: int) -> int:
-    """Return a deterministic offline bin standing in for a real VLM call.
+    """Return a deterministic offline bin by hashing coordinates and seed."""
 
-    This stub stands in for a real VLM call behind a 30-second timeout; a real
-    backend is not wired up. It hashes coordinate data and the seed to return
-    bin 0, 1, or 2 without making a network request.
-    """
-
-    if VLM_BACKEND != "placeholder":
-        raise RuntimeError("real VLM backend is not wired up")
     if len(keyframes) != 3:
         raise ValueError("keyframes must contain exactly three arrays")
     arrays = [np.asarray(frame) for frame in keyframes]
@@ -53,10 +115,66 @@ def vlm_score_stub(keyframes: list[np.ndarray], seed: int) -> int:
     return int.from_bytes(digest.digest()[:4], "big") % 3
 
 
+def vlm_score_gemini(
+    image_bytes: bytes, seq_id: str, angle: float, seed: int
+) -> int | str:
+    """Call Gemini with a stick-figure image, caching results on disk."""
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return "STUB - no API key"
+
+    cache_dir = Path(VLM_CACHE_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.md5(f"{seq_id}_{angle}_{seed}".encode()).hexdigest()
+    cache_file = cache_dir / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text())["bin"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    time.sleep(VLM_RATE_LIMIT_DELAY_S)
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL_ID}:generateContent?key={api_key}"
+    )
+    payload = json.dumps({
+        "contents": [{"parts": [
+            {"text": _GEMINI_PROMPT},
+            {"inline_data": {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            }},
+        ]}],
+    }).encode()
+
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=VLM_TIMEOUT_S) as resp:
+            result = json.loads(resp.read())
+        text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+        bin_val = int(text[0]) if text and text[0].isdigit() else -1
+        if bin_val not in (0, 1, 2):
+            return "STUB - no result"
+        cache_file.write_text(json.dumps({
+            "bin": bin_val, "raw": text,
+            "seq_id": str(seq_id), "angle": float(angle),
+        }))
+        return bin_val
+    except Exception:
+        return "STUB - no result"
+
+
 def vlm_score_with_timeout(
     keyframes: list[np.ndarray], seed: int, timeout_s: float = VLM_TIMEOUT_S
 ) -> int | str:
-    """Run the offline stub under the conceptual timeout, returning no-result on failure."""
+    """Run the offline stub under the conceptual timeout."""
 
     try:
         if timeout_s < 0:
@@ -136,26 +254,49 @@ def bootstrap_ci(
 
 
 def agreement_report(
-    samples: list[Sample], view_degs: tuple = (0, 45), seed: int = RANDOM_SEED
+    samples: list[Sample],
+    view_degs: tuple = (0, 45),
+    seed: int = RANDOM_SEED,
+    backend: str | None = None,
 ) -> dict:
-    """Report model-vs-clinician reliability for synthetic rotated views only."""
+    """Report model-vs-clinician reliability for synthetic rotated views."""
 
-    report = {"model_vs_clinician_reliability": {}}
+    if backend is None:
+        backend = os.environ.get("VLM_BACKEND", VLM_BACKEND)
+
+    report: dict = {"model_vs_clinician_reliability": {}}
     for angle in view_degs:
         model_bins: list[int] = []
         clinician_bins: list[int] = []
         for index, sample in enumerate(samples):
-            keyframes = render_keyframes(rotate_view(sample.joints, angle))
-            score = vlm_score_with_timeout(keyframes, seed + index)
-            if score == "STUB - no result":
+            rotated = rotate_view(sample.joints, angle)
+            keyframes = render_keyframes(rotated)
+
+            if backend == "gemini":
+                image = render_keyframes_image(keyframes)
+                score = vlm_score_gemini(image, sample.seq_id, angle, seed + index)
+            else:
+                score = vlm_score_with_timeout(keyframes, seed + index)
+
+            if isinstance(score, str):
                 continue
             model_bins.append(score)
             clinician_bins.append(int(sample.clinician_bin))
-        metrics = {"sample_count": len(model_bins), "vlm_bins": model_bins, "clinician_bins": clinician_bins}
-        metrics["cohen_kappa"] = cohen_kappa(model_bins, clinician_bins) if model_bins else 0.0
-        metrics["quadratic_weighted_cohen_kappa"] = (
-            cohen_kappa(model_bins, clinician_bins, weights="quadratic") if model_bins else 0.0
-        )
+
+        metrics: dict = {
+            "sample_count": len(model_bins),
+            "vlm_bins": model_bins,
+            "clinician_bins": clinician_bins,
+            "backend": backend,
+        }
+        if model_bins:
+            metrics["cohen_kappa"] = cohen_kappa(model_bins, clinician_bins)
+            metrics["quadratic_weighted_cohen_kappa"] = cohen_kappa(
+                model_bins, clinician_bins, weights="quadratic"
+            )
+        else:
+            metrics["cohen_kappa"] = 0.0
+            metrics["quadratic_weighted_cohen_kappa"] = 0.0
         report["model_vs_clinician_reliability"][str(angle)] = metrics
     return report
 
@@ -170,7 +311,9 @@ def _smoke_test() -> bool:
     assert len(render_keyframes(joints)) == 3
     from .m00_data import make_synthetic_squats
 
-    report = agreement_report(make_synthetic_squats(3, RANDOM_SEED), view_degs=(0, 45), seed=RANDOM_SEED)
+    report = agreement_report(
+        make_synthetic_squats(3, RANDOM_SEED), view_degs=(0, 45), seed=RANDOM_SEED
+    )
     return set(report) == {"model_vs_clinician_reliability"}
 
 
