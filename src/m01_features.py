@@ -91,13 +91,13 @@ def kinematic_flags(joints: np.ndarray) -> dict:
 
     left_knee = 180.0 - _angle_degrees(hip_left - knee_left, ankle_left - knee_left)
     right_knee = 180.0 - _angle_degrees(hip_right - knee_right, ankle_right - knee_right)
-    knee_flexion_min = float(np.min(np.minimum(left_knee, right_knee)))
+    knee_flexion_max = float(np.max(np.maximum(left_knee, right_knee)))
     trunk_lean = _angle_degrees(spine_mid - spine_base, np.array([0.0, 1.0, 0.0]))
     trunk_lean_max = float(np.max(trunk_lean))
     symmetry_diff = float(np.max(np.abs(left_knee - right_knee)))
     return {
-        "knee_flexion_min_deg": knee_flexion_min,
-        "knee_depth_pass": bool(knee_flexion_min >= KNEE_DEPTH_FLEXION_THRESHOLD_DEG),
+        "knee_flexion_max_deg": knee_flexion_max,
+        "knee_depth_pass": bool(knee_flexion_max >= KNEE_DEPTH_FLEXION_THRESHOLD_DEG),
         "trunk_lean_max_deg": trunk_lean_max,
         "trunk_lean_pass": bool(trunk_lean_max <= TRUNK_LEAN_MAX_ANGLE_DEG),
         "symmetry_diff_deg": symmetry_diff,
@@ -108,7 +108,7 @@ def kinematic_flags(joints: np.ndarray) -> dict:
 def flag_error(flags_view: dict, flags_3d: dict) -> dict:
     """Return absolute view-to-reference differences for the three measurements."""
 
-    keys = ("knee_flexion_min_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
+    keys = ("knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
     return {key: float(abs(flags_view[key] - flags_3d[key])) for key in keys}
 
 
@@ -124,14 +124,14 @@ def _smoke_test() -> bool:
     flags = kinematic_flags(joints)
     errors = flag_error(flags, kinematic_flags(rotate_view(joints, 15)))
     expected_flags = {
-        "knee_flexion_min_deg",
+        "knee_flexion_max_deg",
         "knee_depth_pass",
         "trunk_lean_max_deg",
         "trunk_lean_pass",
         "symmetry_diff_deg",
         "symmetry_pass",
     }
-    expected_errors = {"knee_flexion_min_deg", "trunk_lean_max_deg", "symmetry_diff_deg"}
+    expected_errors = {"knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg"}
     return (
         rotate_view(joints, 0) is joints
         and np.array_equal(add_jitter(joints, 0.01, 11), add_jitter(joints, 0.01, 11))

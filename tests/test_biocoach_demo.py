@@ -18,7 +18,7 @@ from app.biocoach_demo import (
 def _detector(abstain=False):
     return {
         "flags": {
-            "knee_flexion_min_deg": 82.4,
+            "knee_flexion_max_deg": 82.4,
             "knee_depth_pass": False,
             "trunk_lean_max_deg": 18.2,
             "trunk_lean_pass": True,

@@ -42,7 +42,7 @@ def _supported_numbers(detector_out: dict) -> list[float]:
 def _template_bullets(detector_out: dict) -> list[str]:
     flags = detector_out["flags"]
     return [
-        f"Knee depth: minimum knee flexion measured at {flags['knee_flexion_min_deg']:.2f} degrees.",
+        f"Knee depth: maximum knee flexion measured at {flags['knee_flexion_max_deg']:.2f} degrees.",
         f"Trunk lean: maximum trunk lean measured at {flags['trunk_lean_max_deg']:.2f} degrees.",
         f"Left-right symmetry: knee angle difference measured at {flags['symmetry_diff_deg']:.2f} degrees.",
     ]
@@ -118,7 +118,7 @@ def log_hallucination_comparison(
 def _sample_detector() -> dict:
     return {
         "flags": {
-            "knee_flexion_min_deg": 82.4,
+            "knee_flexion_max_deg": 82.4,
             "knee_depth_pass": False,
             "trunk_lean_max_deg": 18.2,
             "trunk_lean_pass": True,

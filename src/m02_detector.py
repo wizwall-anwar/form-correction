@@ -66,7 +66,7 @@ def make_clip_split(samples: list[Sample], seed: int) -> tuple[list[Sample], lis
 def extract_features(samples: list[Sample]) -> np.ndarray:
     """Return the three numeric kinematic flag measurements as an ``[N, 3]`` array."""
 
-    keys = ("knee_flexion_min_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
+    keys = ("knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
     rows = [[kinematic_flags(sample.joints)[key] for key in keys] for sample in samples]
     return np.asarray(rows, dtype=float).reshape(-1, 3)
 

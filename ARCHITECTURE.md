@@ -75,7 +75,7 @@ Joint mapping: Kinect v2 25-joint skeleton to the standardized set lives in `con
 - `add_jitter(joints, sigma, seed)`: seeded Gaussian noise.
 - `project_2d(joints)`: orthographic projection to the image plane.
 - `kinematic_flags(joints)`: deterministic, returns measured values and boolean flags:
-  - knee depth: minimum knee flexion angle and whether it passes the depth threshold
+  - knee depth: maximum knee flexion angle reached (the deepest point of the rep) and whether it passes the depth threshold
   - trunk lean: maximum trunk angle from vertical
   - symmetry: left-right knee angle difference
 - Thresholds come from `config.py`, tuned on train subjects only. Flags are measurements, not verdicts.
