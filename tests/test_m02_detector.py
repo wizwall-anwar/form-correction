@@ -14,6 +14,7 @@ from src.m02_detector import (
     make_clip_split,
     make_splits,
     mean_absolute_error,
+    per_flag_correlations,
     predict_scores,
     predict_with_abstention,
     risk_coverage,
@@ -123,13 +124,47 @@ def test_run_evaluation_returns_subject_safe_json_metrics() -> None:
     result = run_evaluation(samples, {0: flags, 15: flags}, 11)
 
     assert set(result) >= {
-        "subject_split", "clip_split", "ece", "risk_coverage",
-        "selective_accuracy_at_coverage", "test_class_counts", "table2_rows",
-        "max_sequences_per_subject", "n_subjects", "n_sequences", "predictions",
+        "subject_split", "per_flag_subject_split", "clip_split", "ece",
+        "risk_coverage", "selective_accuracy_at_coverage", "test_class_counts",
+        "table2_rows", "max_sequences_per_subject", "n_subjects",
+        "n_sequences", "predictions",
     }
     assert set(result["subject_split"]) >= {
         "spearman_rho", "mae", "spearman_rho_ci95", "mae_ci95",
         "mae_mean_baseline", "n_test",
     }
+    assert set(result["per_flag_subject_split"]) == {
+        "knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg",
+    }
     assert len(result["predictions"]) == len(samples)
     assert json.loads(json.dumps(result)) == result
+
+
+def test_per_flag_correlations_perfectly_rank_a_monotone_feature(monkeypatch) -> None:
+    """A flag that monotonically tracks the score yields rho == 1.0."""
+    samples = [replace(sample, clinician_score=float(index))
+               for index, sample in enumerate(_smoke_samples()[:5])]
+    # knee rises with score, trunk is constant (rho == 0), symmetry falls.
+    monkeypatch.setattr(
+        "src.m02_detector.extract_features",
+        lambda rows: np.asarray(
+            [[float(sample.clinician_score), 1.0, -float(sample.clinician_score)]
+             for sample in rows]
+        ),
+    )
+    correlations = per_flag_correlations(samples)
+    assert correlations["knee_flexion_max_deg"] == 1.0
+    assert correlations["trunk_lean_max_deg"] == 0.0
+    assert correlations["symmetry_diff_deg"] == -1.0
+
+
+def test_per_flag_correlations_returns_zeros_when_insufficient_scores() -> None:
+    """Fewer than two scored samples should not crash; emit zeros for the row."""
+    samples = _smoke_samples()[:1]
+    samples = [replace(sample, clinician_score=None) for sample in samples]
+    correlations = per_flag_correlations(samples)
+    assert correlations == {
+        "knee_flexion_max_deg": 0.0,
+        "trunk_lean_max_deg": 0.0,
+        "symmetry_diff_deg": 0.0,
+    }

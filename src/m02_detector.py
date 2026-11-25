@@ -207,6 +207,27 @@ def evaluate_regression(model: _RidgeRegressor, samples: list[Sample]) -> dict:
     }
 
 
+def per_flag_correlations(samples: list[Sample]) -> dict[str, float]:
+    """Return Spearman rho between each named flag and the clinician score.
+
+    Diagnoses the direction and magnitude of each flag's relationship with the
+    clinician score, independent of how the ridge model mixes them. One rho per
+    flag, computed on the supplied samples only (pass test subjects to report
+    held-out correlations). Samples without a clinician score are skipped; if
+    fewer than two scored samples remain the function returns zero for every
+    flag so the caller can emit an empty row without crashing.
+    """
+
+    scored = [sample for sample in samples if sample.clinician_score is not None]
+    keys = ("knee_flexion_max_deg", "trunk_lean_max_deg", "symmetry_diff_deg")
+    if len(scored) < 2:
+        return {key: 0.0 for key in keys}
+    scores = [float(sample.clinician_score) for sample in scored]
+    features = extract_features(scored)
+    return {key: spearman_rho(features[:, index].tolist(), scores)
+            for index, key in enumerate(keys)}
+
+
 def bootstrap_ci(true: list[float], pred: list[float], seed: int,
                  subject_ids: list[str] | None = None) -> dict:
     """Return deterministic percentile CIs by resampling whole test subjects."""
@@ -402,6 +423,7 @@ def run_evaluation(samples: list[Sample], flags_by_angle: dict, seed: int) -> di
                    if sample.clinician_score is not None]
     subject_metrics.update(bootstrap_ci(subject_true, subject_pred, seed, subject_ids))
     subject_metrics["n_test"] = subject_metrics.pop("n")
+    per_flag = per_flag_correlations(test_binned)
 
     classifier = calibrate(train_baseline(fit_binned, seed), val_binned)
     test_predictions = predict_with_abstention(classifier, test_binned)
@@ -451,6 +473,7 @@ def run_evaluation(samples: list[Sample], flags_by_angle: dict, seed: int) -> di
     all_predictions = predict_with_abstention(classifier, rebin(samples, edges))
     return {
         "subject_split": subject_metrics,
+        "per_flag_subject_split": per_flag,
         "clip_split": clip_metrics,
         "ece": classifier_metrics["ece"],
         "risk_coverage": selective_risk,

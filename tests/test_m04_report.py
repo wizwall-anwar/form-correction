@@ -51,6 +51,43 @@ def test_table4_uses_reliability_label():
     assert "model-vs-clinician reliability" in table["comment"]
 
 
+def test_table1_carries_per_flag_subject_split_when_supplied() -> None:
+    """When a per-flag correlations dict is supplied, table1 surfaces it as-is."""
+    subject = {"spearman_rho": -0.5, "mae": 0.08, "spearman_rho_ci95": [-0.8, -0.1],
+               "mae_ci95": [0.05, 0.1], "mae_mean_baseline": 0.07, "n_test": 23}
+    clip = {"spearman_rho": -0.3, "mae": 0.08, "n_test": 23}
+    per_flag = {"knee_flexion_max_deg": -0.2, "trunk_lean_max_deg": 0.1,
+                "symmetry_diff_deg": -0.15}
+
+    table = build_table1("manual", 75, 75, subject, clip, 1,
+                         per_flag_subject_split=per_flag)
+
+    assert table["per_flag_subject_split"] == per_flag
+
+
+def test_table1_omits_per_flag_subject_split_when_not_supplied() -> None:
+    """Backward-compatible: omitting the kwarg leaves the field absent."""
+    subject = {"spearman_rho": 0.0, "mae": 0.0, "spearman_rho_ci95": [0.0, 0.0],
+               "mae_ci95": [0.0, 0.0], "mae_mean_baseline": 0.0, "n_test": 1}
+    clip = {"spearman_rho": 0.0, "mae": 0.0, "n_test": 1}
+    table = build_table1("manual", 1, 1, subject, clip, 1)
+    assert "per_flag_subject_split" not in table
+
+
+def test_table4_carries_detector_vs_clinician_when_supplied() -> None:
+    """When a detector-vs-clinician dict is supplied, table4 surfaces it."""
+    detector = {"n_scored": 55, "cohen_kappa": -0.10,
+                "quadratic_weighted_cohen_kappa": -0.18}
+    table = build_table4({"0": {}, "45": {}}, {"free_form": 0.0},
+                         detector_vs_clinician=detector)
+    assert table["detector_vs_clinician_kappa"] == detector
+
+
+def test_table4_omits_detector_vs_clinician_when_not_supplied() -> None:
+    table = build_table4({"0": {}, "45": {}}, {"free_form": 0.0})
+    assert "detector_vs_clinician_kappa" not in table
+
+
 def test_risk_coverage_figure_writes_file(tmp_path):
     output = tmp_path / "figure.png"
     path = make_risk_coverage_figure([0.5, 1.0], [0.1, 0.2], str(output))

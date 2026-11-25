@@ -322,6 +322,33 @@ def fleiss_kappa(ratings: np.ndarray) -> float:
     return 1.0 if p_bar_e == 1.0 else (p_bar - p_bar_e) / (1.0 - p_bar_e)
 
 
+def detector_vs_clinician_kappa(
+    detector_bins: list[int], clinician_bins: list[int]
+) -> dict[str, float | int | None]:
+    """Return unweighted and quadratic-weighted Cohen's kappa for the detector.
+
+    A comparison row for Table 4: the deterministic flag-based classifier
+    rated as a VLM would be, so model-vs-clinician reliability has a baseline.
+    Expects the two lists to align sample-for-sample. Returns ``None`` for the
+    kappas when there are fewer than two samples, so an empty row can be
+    emitted without crashing. Label is strictly reliability, never validity.
+    """
+
+    if len(detector_bins) != len(clinician_bins):
+        raise ValueError("detector_bins and clinician_bins must align")
+    n = len(detector_bins)
+    if n < 2:
+        return {"n_scored": n, "cohen_kappa": None,
+                "quadratic_weighted_cohen_kappa": None}
+    return {
+        "n_scored": n,
+        "cohen_kappa": cohen_kappa(detector_bins, clinician_bins),
+        "quadratic_weighted_cohen_kappa": cohen_kappa(
+            detector_bins, clinician_bins, weights="quadratic"
+        ),
+    }
+
+
 def bootstrap_ci(
     per_subject_values: list[float], seed: int, n_resamples: int = 200
 ) -> tuple[float, float]:

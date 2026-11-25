@@ -14,6 +14,7 @@ from src.m00_data import make_synthetic_squats
 from src.m03_agreement import (
     agreement_report,
     cohen_kappa,
+    detector_vs_clinician_kappa,
     fleiss_kappa,
     render_keyframes,
     render_keyframes_image,
@@ -416,3 +417,25 @@ def test_gemini_agreement_failures_are_seeded_and_unavailable(
 def test_gemini_model_is_not_retired_flash_lite():
     assert config.GEMINI_MODEL_ID != "gemini-2.0-flash-lite"
     assert config.GEMINI_MODEL_FALLBACKS[0] == config.GEMINI_MODEL_ID
+
+
+def test_detector_vs_clinician_kappa_matches_cohen_on_equal_length_rows():
+    """Helper returns Cohen's kappas and the sample count for aligned rows."""
+    result = detector_vs_clinician_kappa([0, 1, 2, 1], [0, 2, 2, 1])
+    assert result["n_scored"] == 4
+    assert abs(result["cohen_kappa"] - cohen_kappa([0, 1, 2, 1], [0, 2, 2, 1])) < 1e-12
+    assert abs(result["quadratic_weighted_cohen_kappa"]
+               - cohen_kappa([0, 1, 2, 1], [0, 2, 2, 1], weights="quadratic")) < 1e-12
+
+
+def test_detector_vs_clinician_kappa_handles_small_samples():
+    """Fewer than two samples should return None kappas without crashing."""
+    result = detector_vs_clinician_kappa([0], [1])
+    assert result == {"n_scored": 1, "cohen_kappa": None,
+                      "quadratic_weighted_cohen_kappa": None}
+
+
+def test_detector_vs_clinician_kappa_rejects_misaligned_rows():
+    """Mismatched lengths raise ValueError rather than silently truncating."""
+    with pytest.raises(ValueError):
+        detector_vs_clinician_kappa([0, 1, 2], [0, 1])

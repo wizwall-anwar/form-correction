@@ -22,8 +22,15 @@ import matplotlib.pyplot as plt
 
 def build_table1(data_source: str, n_subjects: int, n_sequences: int,
                  subject_split: dict, clip_split: dict,
-                 max_sequences_per_subject: int) -> dict:
-    """Build the dataset and regression split summary table."""
+                 max_sequences_per_subject: int,
+                 per_flag_subject_split: dict | None = None) -> dict:
+    """Build the dataset and regression split summary table.
+
+    ``per_flag_subject_split`` is optional for backward compatibility with
+    earlier runs; when supplied it carries the per-flag Spearman rho vs the
+    clinician score on held-out subjects, which diagnoses whether individual
+    flags carry signal that the mixed ridge model cancels out.
+    """
 
     note = (
         "Metrics use held-out subjects. KIMORE skeletons are Kinect-derived; "
@@ -31,7 +38,7 @@ def build_table1(data_source: str, n_subjects: int, n_sequences: int,
     )
     if max_sequences_per_subject == 1:
         note += " The clip split equals the subject split on this data, so the leakage comparison is not informative."
-    return {
+    table = {
         "data_source": data_source,
         "n_subjects": n_subjects,
         "n_sequences": n_sequences,
@@ -40,6 +47,9 @@ def build_table1(data_source: str, n_subjects: int, n_sequences: int,
         "max_sequences_per_subject": max_sequences_per_subject,
         "note": note,
     }
+    if per_flag_subject_split is not None:
+        table["per_flag_subject_split"] = per_flag_subject_split
+    return table
 
 
 def build_table2(rows: list[dict]) -> dict:
@@ -69,14 +79,23 @@ def build_table3(ece: float, selective_accuracy_at_coverage: dict,
     }
 
 
-def build_table4(kappa_report: dict, hallucination_rates: dict) -> dict:
-    """Build model-vs-clinician reliability and hallucination summaries."""
-    return {
+def build_table4(kappa_report: dict, hallucination_rates: dict,
+                 detector_vs_clinician: dict | None = None) -> dict:
+    """Build model-vs-clinician reliability and hallucination summaries.
+
+    ``detector_vs_clinician`` is optional for backward compatibility; when
+    supplied it carries Cohen's kappa for the flag-based detector against
+    the same clinician bins, as a comparison line to the VLM kappas.
+    """
+    table = {
         "kappa_report": kappa_report,
         "kappa_0_vs_45": kappa_report,
         "hallucination_rates": hallucination_rates,
         "comment": "Labeled model-vs-clinician reliability.",
     }
+    if detector_vs_clinician is not None:
+        table["detector_vs_clinician_kappa"] = detector_vs_clinician
+    return table
 
 
 def make_risk_coverage_figure(coverage: list[float], risk: list[float],
