@@ -4,9 +4,11 @@ import subprocess
 import sys
 import time
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from src.config import PRINCETON_CHECK_TIMEOUT_S, RANDOM_SEED, STANDARDIZED_JOINT_NAMES
 from src.m00_data import (
@@ -58,41 +60,44 @@ def test_smoke_test_cli_is_fast_and_passes() -> None:
     assert time.perf_counter() - started < 5
 
 
-def test_load_kimore_ex5_reads_manual_layout(tmp_path: Path) -> None:
-    for subject in ("S01", "S02"):
-        root = tmp_path / "KiMoRe" / "GPP" / subject / "Es5"
-        (root / "Raw").mkdir(parents=True)
-        (root / "Label").mkdir()
-        (root / "Raw" / "squat.csv").write_text(
-            "SpineBase_X,SpineBase_Y,SpineBase_Z,KneeLeft_X,KneeLeft_Y,KneeLeft_Z,"
-            "KneeRight_X,KneeRight_Y,KneeRight_Z\n"
-            "0,1,0,-.2,.5,0,.2,.5,0\n"
-            "0,.9,0,-.2,.4,0,.2,.4,0\n",
-            encoding="utf-8",
-        )
-        (root / "Label" / "score.csv").write_text(
-            "ClinicalScore\n0.8\n", encoding="utf-8"
-        )
-
+def test_load_kimore_ex5_reads_real_pickle_layout(tmp_path: Path) -> None:
+    positions = np.array(
+        [[1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 8, 9, 10, 11]], dtype=np.float32
+    )
+    frame = pd.DataFrame(
+        {
+            "spinebase": [positions, positions + 10],
+            "kneelefT": [positions, positions + 20],
+            "cTS": [0.8, 0.6],
+        }
+    )
+    path = tmp_path / "KiMoRe" / "kimore_exercise_dataset.pkl"
+    path.parent.mkdir(parents=True)
+    with path.open("wb") as handle:
+        pickle.dump({"ex5": frame}, handle)
     samples = load_kimore_ex5(str(tmp_path))
     assert len(samples) == 2
-    assert {sample.subject_id for sample in samples} == {"GPP/S01", "GPP/S02"}
+    assert len({sample.subject_id for sample in samples}) == 2
     assert all(sample.data_source == "manual" for sample in samples)
     assert all(sample.joints.shape == (2, len(STANDARDIZED_JOINT_NAMES), 3) for sample in samples)
-    assert all(sample.clinician_score == 0.8 for sample in samples)
+    assert [sample.clinician_score for sample in samples] == [0.8, 0.6]
+    assert np.array_equal(samples[0].joints[:, STANDARDIZED_JOINT_NAMES.index("spine_base")], positions[:, 4:7])
 
 
-def test_load_uiprmd_reads_manual_layout(tmp_path: Path) -> None:
-    for subject, label in (("Subject1", "Correct"), ("Subject2", "Incorrect")):
-        folder = tmp_path / "UI-PRMD" / subject / "Positions" / label
-        folder.mkdir(parents=True)
-        rows = [" ".join(str(value) for value in range(30)), " ".join(str(value + 1) for value in range(30))]
-        (folder / "DeepSquat_1.txt").write_text("\n".join(rows), encoding="utf-8")
-
+def test_load_uiprmd_reads_real_layout_and_groups_subjects(tmp_path: Path) -> None:
+    values = ",".join(str(value) for value in range(66))
+    for episode in ("01", "02"):
+        folder = tmp_path / "UI-PRMD" / "Correct" / "Kinect" / "Positions"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"m01_s01_e{episode}_positions.txt").write_text(values, encoding="utf-8")
+    incorrect = tmp_path / "UI-PRMD" / "Incorrect" / "Kinect" / "Positions"
+    incorrect.mkdir(parents=True)
+    (incorrect / "m01_s02_e01_positions.txt").write_text(values, encoding="utf-8")
     samples = load_uiprmd(str(tmp_path))
-    assert len(samples) == 2
-    assert {sample.subject_id for sample in samples} == {"Subject1", "Subject2"}
-    assert [sample.clinician_score for sample in samples] == [1.0, 0.0]
+    assert len(samples) == 3
+    assert {sample.subject_id for sample in samples} == {"uiprmd_s01", "uiprmd_s02"}
+    assert [sample.clinician_score for sample in samples].count(1.0) == 2
+    assert [sample.clinician_score for sample in samples].count(0.0) == 1
     assert all(sample.data_source == "manual" for sample in samples)
 
 
@@ -105,12 +110,9 @@ def test_garbage_data_dir_uses_synthetic_fallback(tmp_path: Path) -> None:
 
 def test_load_data_falls_back_to_uiprmd_before_synthetic(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "garbage.txt").write_text("not a dataset", encoding="utf-8")
-    folder = tmp_path / "UI-PRMD" / "Subject1" / "Positions" / "Correct"
+    folder = tmp_path / "UI-PRMD" / "Correct" / "Kinect" / "Positions"
     folder.mkdir(parents=True)
-    (folder / "DeepSquat_1.txt").write_text(
-        "\n".join(" ".join(str(value + offset) for value in range(30)) for offset in (0, 1)),
-        encoding="utf-8",
-    )
+    (folder / "m01_s01_e01_positions.txt").write_text(",".join(str(value) for value in range(66)), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     samples = load_data(str(tmp_path))

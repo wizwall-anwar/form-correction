@@ -22,7 +22,9 @@ KIMORE_SCORE_COLUMN_CANDIDATES: Final[tuple[str, ...]] = (
     "ClinicalScore",
     "TotalScore",
     "Score",
+    "cTS",
 )
+UI_PRMD_SQUAT_MOVEMENT_CODE: Final[str] = "01"
 UI_PRMD_LABELS: Final[dict[str, float]] = {"correct": 1.0, "incorrect": 0.0}
 
 # Fixed quantile probabilities: compute score tertiles on the training split only.
