@@ -15,6 +15,8 @@ form-correction/
   DECISIONS.md
   ARCHITECTURE.md
   README.md                   short: how to run smoke test and the notebook
+  PAPER_DRAFT.md              working manuscript, synced to the latest Kaggle run
+  SLIDES_OUTLINE.md           talk outline, synced to the paper
   requirements.txt
   kaggle_colab_runner.ipynb   cloud entry point (section 6)
   src/
@@ -22,16 +24,20 @@ form-correction/
     config.py                 all thresholds, seeds, angles, bins, timeouts
     m00_data.py               load data, build Sample objects, fallback chain
     m01_features.py           rotate, jitter, project, compute flags
-    m02_detector.py           splits, baseline, temporal model, calibration, abstain
-    m03_agreement.py          VLM-vs-clinician kappa, 0 vs 45 degrees
+    m02_detector.py           splits, baseline, calibration, abstain, per-flag diagnostic
+    m03_agreement.py          VLM-vs-clinician kappa, detector-vs-clinician kappa
     m04_report.py             tables, figure, manifest, results_bundle.zip
   app/
     __init__.py
     biocoach_demo.py          3-bullet grounded critique, refusal, hallucination log
+  scripts/
+    make_slide_exhibits.py    offline static-exhibit renderer (patch D, 2026-11-25)
   tests/
     test_m00_data.py ... test_m04_report.py
     test_biocoach_demo.py
     test_leakage.py
+    test_config.py
+  slides_figures/             static exhibits for the talk; not written by the pipeline
   results/                    written on Kaggle/Colab, not committed
     manifest.json  table1..table4  fig1_risk_coverage.png  weights/  halluc_log.jsonl
 ```
@@ -82,35 +88,37 @@ Joint mapping: Kinect v2 25-joint skeleton to the standardized set lives in `con
 - `flag_error(flags_view, flags_3d)`: error in degrees versus the 3D reference. This is the flag-error-vs-angle curve.
 - `--smoke-test`: rotation at 0 is identity, flags are deterministic on dummy data.
 
-### m02_detector.py — learn, calibrate, abstain
+### m02_detector.py — learn, calibrate, abstain, per-flag diagnostic
 - `make_splits(samples, seed)`: grouped by `subject_id`. Asserts `len(set(train_subj) & set(test_subj)) == 0`.
 - `make_clip_split(samples, seed)`: deliberately leaky split used only to show the clip-vs-subject gap.
-- Baseline: logistic regression or gradient boosting on flag features.
-- Temporal model: small 1D TCN or GRU on the projected sequence. Only kept if it earns its place.
-- Calibration: temperature scaling or isotonic, fit on a validation subject group.
+- Primary (regression): closed-form ridge on the three flag measurements predicts the raw clinician score. Reported as Spearman rho and MAE on held-out subjects, with subject-bootstrap 95% CIs and train-mean MAE baseline.
+- Secondary (classification): multinomial logistic regression over train-only tertile bins; used only for calibration and abstention.
+- Calibration: temperature scaling, fit on a held-out validation subject group disjoint from both fit and test.
 - Abstention: threshold on calibrated confidence. Output per sample: `pred_bin`, `confidence`, `abstain_flag`.
 - `risk_coverage(...)`: selective risk versus coverage. Feeds `fig1`.
-- Metrics: F1 or Spearman rho, ECE, precision at fixed coverage, by view angle.
+- `per_flag_correlations(samples)`: Spearman rho of each flag vs the clinician score on the supplied samples (patch A, 2026-11-25). `run_evaluation` emits it under `per_flag_subject_split` (computed on held-out subjects); `build_table1` surfaces it. Diagnoses whether individual flags carry signal that the mixed ridge model cancels out.
+- `run_evaluation(...)`: asserts four-way disjointness across fit, validation, test, and the parent train subject groups; returns regression metrics, per-flag correlations, classifier calibration, risk-coverage, and per-angle table2 rows.
 - `--smoke-test`: trains on 8 dummy tensors for a few steps, under 5 s.
 
-### m03_agreement.py — VLM vs clinician
+### m03_agreement.py — VLM vs clinician, detector vs clinician
 - For each view angle, render keyframes (start, bottom, end) as stick figures from the rotated and projected skeleton.
-- Ask the VLM for a score bin. Backend set in `config.py`, 30 s timeout. On timeout, mark `STUB - no result`. Never fake a number.
-- Cohen's kappa (quadratic-weighted and unweighted): VLM vs clinician bin, at 0 and 45 degrees, plus all five angles.
-- Fleiss' kappa: across repeated VLM runs or personas, for self-consistency. Reported separately.
-- Detector-vs-clinician kappa as a comparison row.
-- Bootstrap confidence intervals, resampled by subject.
+- Ask the VLM for a score bin. Backend set in `config.py`, 30 s timeout. On timeout or exhausted retries, mark `STUB - no result`. Never fake a number.
+- Resilience: model-list fallback walk (`GEMINI_MODEL_FALLBACKS`), `Retry-After` honored, exponential backoff with jitter bounded by `VLM_RETRY_MAX_ATTEMPTS`/`VLM_RETRY_BASE_DELAY_S`/`VLM_RETRY_MAX_DELAY_S`, on-disk cache under `results/vlm_cache/` keyed by `(seq_id, angle, seed)`. API key sent only in the `x-goog-api-key` header; log output is redacted.
+- Cohen's kappa (quadratic-weighted and unweighted): VLM vs clinician bin, at 0 and 45 degrees.
+- `detector_vs_clinician_kappa(detector_bins, clinician_bins)` (patch B, 2026-11-25): Cohen's kappa (unweighted and quadratic-weighted) plus `n_scored` for the flag-based classifier against clinician bins. Surfaced in `build_table4` as `detector_vs_clinician_kappa`. Gives the VLM kappa a non-zero baseline to be compared against.
+- Fleiss' kappa for VLM self-consistency across repeated runs is future work: no repeated-run data on the Gemini backend is collected by the current runner.
 - Wording rule: output is labeled "model-vs-clinician reliability". Never "validity".
 - `--smoke-test`: kappa on toy ratings with a known answer. Offline stub backend.
 
 ### m04_report.py — package results
-- `table1`: data source, subject and sequence counts, subject-split vs clip-split baseline.
-- `table2`: detector performance and flag error by view angle (0, 15, 30, 45, 60). Captions say synthetic views.
-- `table3`: calibration and abstention: ECE, precision at coverage, selective risk.
-- `table4`: VLM-vs-clinician kappa (0 vs 45, with CIs) and hallucination rates, free-form vs grounded.
+- `table1`: data source, subject and sequence counts, subject-split vs clip-split baseline; optional `per_flag_subject_split` field (patch A kwarg) carries per-flag Spearman rho on held-out subjects.
+- `table2`: detector performance and flag error by view angle (0, 15, 30, 45, 60). Captions say synthetic views; non-zero-angle rows carry `is_synthetic_view=True`.
+- `table3`: calibration and abstention: ECE, `selective_accuracy_at_coverage` (not `precision_at_coverage`), selective risk curve, test class counts.
+- `table4`: VLM-vs-clinician kappa (0 vs 45) and hallucination rates (free-form vs grounded); optional `detector_vs_clinician_kappa` field (patch B kwarg) carries the flag-based classifier's Cohen's kappa against clinician bins as a comparison line.
 - `fig1_risk_coverage.png`.
 - Saves model weights, `manifest.json`, then zips everything to `results_bundle.zip`.
 - Stamps `SYNTHETIC - not evidence` on any output built from synthetic data.
+- Backward-compatible: `build_table1`/`build_table4` accept their new kwargs as optional; omitted kwargs leave the field absent.
 - `--smoke-test`: builds all tables from dummy inputs, checks files exist.
 
 ### app/biocoach_demo.py — the grounded critique
@@ -137,14 +145,21 @@ Joint mapping: Kinect v2 25-joint skeleton to the standardized set lives in `con
 
 ## 6. kaggle_colab_runner.ipynb
 
-Cells in order:
-1. Setup: install requirements, set seeds, get the repo (clone from GitHub or upload `src.zip`).
-2. Config: top-level `DATA_DIR = None` hook. Set it to a manual path to skip fetching.
+Cell 0 (markdown) carries an "Expected result" banner stating that ρ < 0 with a CI not crossing zero is the published negative finding, not a bug (patch C, 2026-11-25). Cells in order:
+
+1. Setup: install requirements, set seeds, clone or `git pull --ff-only` the repo from GitHub.
+2. Config: top-level `DATA_DIR = None` hook; `resolve_data_dir()` walks up to depth 5 to find `KiMoRe/` or `UI-PRMD/`. Loads Gemini API key from Colab or Kaggle secrets.
 3. Data: run the fallback chain. Print which source ran.
 4. Features: build views 0/15/30/45/60 with jitter.
-5. Detector: splits, baseline, temporal model, calibration, abstain.
-6. Agreement: VLM-vs-clinician kappa.
+5. Detector: splits, regression, calibration, abstain; also prints `per_flag_subject_split` (patch A) and `detector_vs_clinician_kappa` (patch B) inline.
+6. Agreement: VLM-vs-clinician kappa (served from on-disk cache if present).
 7. Hallucination comparison via the demo module.
-8. Report: tables, figure, weights, `results_bundle.zip`. Download link at the end.
+8. Report: tables (with the new patch A/B fields populated), figure, weights, `results_bundle.zip`. Download link at the end.
 
-Every cell prints a one-line status. A failed cell must not stop later cells that can still run on fallback data.
+**Partial run to backfill diagnostic fields without touching Gemini:** cells 1–5 and 8 only. Useful when Gemini is flaky and you just need `per_flag_subject_split` and `detector_vs_clinician_kappa` in the bundle.
+
+## 7. scripts/make_slide_exhibits.py
+
+Offline plain-Python exhibit renderer (patch D, 2026-11-25). Reads the KIMORE pickle when present (falls back to the synthetic generator when it's absent), renders start/bottom/end stick-figure keyframes at 0° and 45° using `render_keyframes_image`, and composes a side-by-side `fig_biocoach_safety_exhibit.png` with the grounded BioCoach bullets next to a rejected free-form fabrication. Defaults to reading `results/halluc_log.jsonl` record 1 for the detector numbers, with a baked-in fallback. Mirrors the DECISIONS §5 (2026-11-25) offline-inspection pattern: no pipeline run, no network, no training.
+
+Every cell in the notebook prints a one-line status. A failed cell must not stop later cells that can still run on fallback data.

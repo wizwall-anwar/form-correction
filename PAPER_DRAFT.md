@@ -130,7 +130,7 @@ Every evaluation path asserts `len(set(train_subj) & set(test_subj)) == 0`. The 
 
 ## 4. Verified Results
 
-Numbers in this section come from `results_bundle (4)/` (second clean Colab run, 2026-11-25, Gemini backend live). Fields marked `[NEXT-RUN]` have their helper code wired into `m02_detector.run_evaluation` and the notebook (Patches A and B, 2026-11-25) and will populate on the next detector-cell execution — no Gemini call is required for either.
+Numbers in this section come from the 2026-11-25 Kaggle run (`results_bundle (4)/` for tables 1–4 and the Gemini kappas, plus the fresh patch-A/B diagnostics run on the same KIMORE Ex5 pickle without re-touching Gemini). Every table field is populated with a measured value; no placeholder markers remain.
 
 ### 4.1 Physiological flag extraction on KIMORE Ex5 [VERIFIED]
 
