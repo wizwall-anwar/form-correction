@@ -127,9 +127,7 @@ def vlm_score_gemini(
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        _LOGGER.warning(
-            "Gemini scoring failed; HTTP status=unavailable; response body=<unavailable>"
-        )
+        _LOGGER.warning("Gemini scoring failed; GEMINI_API_KEY not set")
         return _STUB_RESULT
 
     cache_dir = Path(VLM_CACHE_DIR)
@@ -168,15 +166,22 @@ def vlm_score_gemini(
     )
     status: int | str = "unavailable"
     response_body = ""
+    error = "<unavailable>"
     try:
         with urllib.request.urlopen(req, timeout=VLM_TIMEOUT_S) as resp:
             status = getattr(resp, "status", "unavailable")
             response_body = resp.read().decode("utf-8", errors="replace")
         result = json.loads(response_body)
-        text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        if text not in ("0", "1", "2"):
-            raise ValueError("Gemini response was not a score digit")
-        bin_val = int(text)
+        parts = result["candidates"][0]["content"]["parts"]
+        text = next(
+            part["text"]
+            for part in parts
+            if isinstance(part.get("text"), str)
+        )
+        stripped_text = text.lstrip()
+        if not stripped_text or stripped_text[0] not in ("0", "1", "2"):
+            raise ValueError(f"Gemini response text={text[:40]!r}")
+        bin_val = int(stripped_text[0])
         cache_file.write_text(json.dumps({
             "bin": bin_val, "raw": text,
             "seq_id": str(seq_id), "angle": float(angle),
@@ -188,14 +193,18 @@ def vlm_score_gemini(
             response_body = exc.read().decode("utf-8", errors="replace")
         except Exception:
             response_body = ""
-    except Exception:
-        pass
+        error = f"HTTPError: {exc.reason}"
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
 
+    status_text = str(status).replace(api_key, "[REDACTED]")
     preview = response_body.replace(api_key, "[REDACTED]")[:VLM_ERROR_BODY_PREVIEW_CHARS]
+    error = error.replace(api_key, "[REDACTED]")
     _LOGGER.warning(
-        "Gemini scoring failed; HTTP status=%s; response body=%s",
-        status,
+        "Gemini scoring failed; HTTP status=%s; response body=%s; error=%s",
+        status_text,
         preview or "<unavailable>",
+        error,
     )
     return _STUB_RESULT
 

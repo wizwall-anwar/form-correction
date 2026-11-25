@@ -1,10 +1,12 @@
 """Test offline agreement metrics, Gemini requests, and failure reporting."""
 
 import io
+import json
 import logging
 import urllib.error
 
 import numpy as np
+import pytest
 
 from src import config
 from src import m03_agreement
@@ -94,6 +96,102 @@ def test_gemini_parses_digit_and_sends_key_only_in_header(monkeypatch, tmp_path)
     assert vlm_score_gemini(b"png", "seq", 0, 7) == 2
     assert requests[0].get_header("X-goog-api-key") == "test-secret"
     assert "test-secret" not in requests[0].full_url
+
+
+@pytest.mark.parametrize(
+    ("seq_id", "text", "parts_prefix"),
+    [
+        ("punctuation", "1.", []),
+        ("explanation", "1\nbecause", [{"thought": True}]),
+    ],
+)
+def test_gemini_parses_first_digit_and_searches_parts(
+    monkeypatch, tmp_path, seq_id, text, parts_prefix
+):
+    body = json.dumps({
+        "candidates": [{"content": {"parts": parts_prefix + [{"text": text}]}}]
+    }).encode()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        m03_agreement.urllib.request, "urlopen", lambda request, timeout: _Response(body)
+    )
+
+    assert vlm_score_gemini(b"png", seq_id, 0, 7) == 1
+
+
+def test_gemini_200_without_candidates_logs_body_without_key(
+    monkeypatch, tmp_path, caplog
+):
+    api_key = "never-log-this-key"
+    body = b'{"blocked":"no candidates"}'
+
+    monkeypatch.setenv("GEMINI_API_KEY", api_key)
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        m03_agreement.urllib.request,
+        "urlopen",
+        lambda request, timeout: _Response(body),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert body.decode() in caplog.text
+    assert api_key not in caplog.text
+
+
+def test_gemini_url_error_logs_exception_type(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        m03_agreement.urllib.request,
+        "urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            urllib.error.URLError("offline")
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert "URLError" in caplog.text
+
+
+def test_gemini_invalid_text_logs_text(monkeypatch, tmp_path, caplog):
+    body = b'{"candidates":[{"content":{"parts":[{"text":"Maybe"}]}}]}'
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(m03_agreement, "VLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(m03_agreement.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        m03_agreement.urllib.request,
+        "urlopen",
+        lambda request, timeout: _Response(body),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert "Maybe" in caplog.text
+
+
+def test_gemini_missing_key_logs_distinct_message(monkeypatch, caplog):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        result = vlm_score_gemini(b"png", "seq", 0, 7)
+
+    assert result == "STUB - no result"
+    assert "GEMINI_API_KEY not set" in caplog.text
+    assert "HTTP status" not in caplog.text
 
 
 def test_gemini_http_404_returns_stub_and_logs_without_key(
