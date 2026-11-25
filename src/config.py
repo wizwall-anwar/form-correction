@@ -82,13 +82,25 @@ KINECT_V2_TO_STANDARD_JOINT_MAP: Final[dict[str, str]] = {
 }
 
 
+def _find_kaggle_dataset_dir(base: Path) -> Optional[str]:
+    """Return the first Kaggle dataset mount containing a supported dataset."""
+
+    if not base.is_dir():
+        return None
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and any((child / name).is_dir() for name in ("KiMoRe", "UI-PRMD")):
+            return str(child)
+    return None
+
+
 def resolve_data_dir(data_dir: Optional[str] = None) -> Optional[str]:
     """Resolve an existing local dataset directory without touching the network.
 
     Inputs are an optional explicit path and the ``FORM_CORRECTION_DATA_DIR``
     environment variable. Outputs are the first existing path among those,
-    common Colab paths, and common Kaggle paths, or ``None``. This only checks
-    ``Path.exists()``; it never lists, downloads, or modifies any filesystem.
+    common Colab paths, and Kaggle dataset mounts, or ``None``. Kaggle discovery
+    lists only ``/kaggle/input``'s immediate children; it never downloads or
+    modifies any filesystem.
     """
 
     candidates = [data_dir, os.environ.get(FORM_CORRECTION_DATA_DIR_ENV)]
@@ -96,11 +108,9 @@ def resolve_data_dir(data_dir: Optional[str] = None) -> Optional[str]:
         (
             "/content/drive/MyDrive/form-correction-data",
             "/content/data",
-            "/kaggle/input/kimore",
-            "/kaggle/input/ui-prmd",
         )
     )
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return str(Path(candidate))
-    return None
+    return _find_kaggle_dataset_dir(Path("/kaggle/input"))
