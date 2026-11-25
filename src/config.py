@@ -1,0 +1,70 @@
+"""Central constants for the form-analysis pipeline.
+
+Inputs are skeleton views, clinician scores, and optional network-backed model
+requests; outputs are shared seeds, thresholds, binning rules, timeouts, and
+joint-name mappings. Keeping them here prevents modules from drifting apart
+and makes experiments reproducible.
+"""
+
+from typing import Final
+
+
+RANDOM_SEED: Final[int] = 20261124
+ROTATION_ANGLES_DEG: Final[tuple[int, ...]] = (0, 15, 30, 45, 60)
+JITTER_SIGMA: Final[float] = 0.01
+NETWORK_TIMEOUT_S: Final[int] = 30
+PRINCETON_CHECK_TIMEOUT_S: Final[int] = 15
+
+# Fixed quantile probabilities: compute score tertiles on the training split only.
+CLINICIAN_SCORE_BIN_EDGES: Final[tuple[float, float]] = (1 / 3, 2 / 3)
+
+# Fit and validate these deterministic flag thresholds on train-split subjects only, never test subjects.
+KNEE_DEPTH_FLEXION_THRESHOLD_DEG: Final[float] = 90.0
+TRUNK_LEAN_MAX_ANGLE_DEG: Final[float] = 20.0
+SYMMETRY_KNEE_ANGLE_DIFF_THRESHOLD_DEG: Final[float] = 15.0
+
+ABSTAIN_CONFIDENCE_THRESHOLD: Final[float] = 0.70
+VLM_BACKEND: Final[str] = "placeholder"
+VLM_TIMEOUT_S: Final[int] = 30
+
+STANDARDIZED_JOINT_NAMES: Final[tuple[str, ...]] = (
+    "hip_left",
+    "hip_right",
+    "knee_left",
+    "knee_right",
+    "ankle_left",
+    "ankle_right",
+    "spine_base",
+    "spine_mid",
+    "shoulder_left",
+    "shoulder_right",
+)
+
+# Kinect v2's 25 names; distal points without a standardized slot collapse to the nearest body landmark.
+KINECT_V2_TO_STANDARD_JOINT_MAP: Final[dict[str, str]] = {
+    "SpineBase": "spine_base",
+    "SpineMid": "spine_mid",
+    "Neck": "spine_mid",
+    "Head": "spine_mid",
+    "ShoulderLeft": "shoulder_left",
+    "ElbowLeft": "shoulder_left",
+    "WristLeft": "shoulder_left",
+    "HandLeft": "shoulder_left",
+    "ShoulderRight": "shoulder_right",
+    "ElbowRight": "shoulder_right",
+    "WristRight": "shoulder_right",
+    "HandRight": "shoulder_right",
+    "HipLeft": "hip_left",
+    "KneeLeft": "knee_left",
+    "AnkleLeft": "ankle_left",
+    "FootLeft": "ankle_left",
+    "HipRight": "hip_right",
+    "KneeRight": "knee_right",
+    "AnkleRight": "ankle_right",
+    "FootRight": "ankle_right",
+    "SpineShoulder": "spine_mid",
+    "HandTipLeft": "shoulder_left",
+    "ThumbLeft": "shoulder_left",
+    "HandTipRight": "shoulder_right",
+    "ThumbRight": "shoulder_right",
+}
