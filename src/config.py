@@ -6,7 +6,9 @@ joint-name mappings. Keeping them here prevents modules from drifting apart
 and makes experiments reproducible.
 """
 
-from typing import Final
+import os
+from pathlib import Path
+from typing import Final, Optional
 
 
 RANDOM_SEED: Final[int] = 20261124
@@ -14,6 +16,14 @@ ROTATION_ANGLES_DEG: Final[tuple[int, ...]] = (0, 15, 30, 45, 60)
 JITTER_SIGMA: Final[float] = 0.01
 NETWORK_TIMEOUT_S: Final[int] = 30
 PRINCETON_CHECK_TIMEOUT_S: Final[int] = 15
+FORM_CORRECTION_DATA_DIR_ENV: Final[str] = "FORM_CORRECTION_DATA_DIR"
+KIMORE_EXERCISE_DIR_NAME: Final[str] = "Es5"
+KIMORE_SCORE_COLUMN_CANDIDATES: Final[tuple[str, ...]] = (
+    "ClinicalScore",
+    "TotalScore",
+    "Score",
+)
+UI_PRMD_LABELS: Final[dict[str, float]] = {"correct": 1.0, "incorrect": 0.0}
 
 # Fixed quantile probabilities: compute score tertiles on the training split only.
 CLINICIAN_SCORE_BIN_EDGES: Final[tuple[float, float]] = (1 / 3, 2 / 3)
@@ -68,3 +78,27 @@ KINECT_V2_TO_STANDARD_JOINT_MAP: Final[dict[str, str]] = {
     "HandTipRight": "shoulder_right",
     "ThumbRight": "shoulder_right",
 }
+
+
+def resolve_data_dir(data_dir: Optional[str] = None) -> Optional[str]:
+    """Resolve an existing local dataset directory without touching the network.
+
+    Inputs are an optional explicit path and the ``FORM_CORRECTION_DATA_DIR``
+    environment variable. Outputs are the first existing path among those,
+    common Colab paths, and common Kaggle paths, or ``None``. This only checks
+    ``Path.exists()``; it never lists, downloads, or modifies any filesystem.
+    """
+
+    candidates = [data_dir, os.environ.get(FORM_CORRECTION_DATA_DIR_ENV)]
+    candidates.extend(
+        (
+            "/content/drive/MyDrive/form-correction-data",
+            "/content/data",
+            "/kaggle/input/kimore",
+            "/kaggle/input/ui-prmd",
+        )
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate))
+    return None
